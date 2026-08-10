@@ -1,4 +1,8 @@
-"""GitHub 저장소 변경사항(커밋/PR diff) 추적 클라이언트."""
+"""GitHub 저장소 변경사항(커밋/PR diff) 추적 클라이언트.
+
+웹훅(push, pull_request) payload를 받아 실제 diff 텍스트를 가져오는 역할.
+Orchestrator 에이전트가 이 모듈로 diff를 확보한 뒤 파이프라인에 넘긴다.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ GITHUB_API_BASE = "https://api.github.com"
 
 
 def verify_webhook_signature(payload_body: bytes, signature_header: str | None, secret: str) -> bool:
+    """GitHub webhook의 X-Hub-Signature-256 헤더를 검증한다."""
     if not signature_header or not signature_header.startswith("sha256="):
         return False
     expected = hmac.new(secret.encode(), payload_body, hashlib.sha256).hexdigest()
@@ -27,6 +32,7 @@ async def get_commit_diff(
     token: str | None = None,
     timeout: float = 15.0,
 ) -> str:
+    """단일 커밋의 diff(patch)를 텍스트로 가져온다."""
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{commit_sha}"
     headers = {"Accept": "application/vnd.github+json"}
     auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
@@ -55,6 +61,7 @@ async def get_pull_request_diff(
     token: str | None = None,
     timeout: float = 15.0,
 ) -> str:
+    """PR 전체 diff를 텍스트로 가져온다."""
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
     headers = {"Accept": "application/vnd.github.v3.diff"}
     auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
@@ -76,7 +83,11 @@ async def post_commit_comment(
     token: str | None = None,
     timeout: float = 15.0,
 ) -> dict:
-    """커밋에 IP Sentinel 리포트를 댓글로 남긴다."""
+    """커밋에 IP Sentinel 리포트를 댓글로 남긴다.
+
+    Firestore/로그를 뒤지지 않아도, 커밋을 만든 바로 그 자리에서 리포트를
+    확인할 수 있게 하는 게 목적 (UR-01: 별도 시간 없이 자동으로 확인).
+    """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{commit_sha}/comments"
     headers = {"Accept": "application/vnd.github+json"}
     auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
@@ -89,7 +100,129 @@ async def post_commit_comment(
         return resp.json()
 
 
+async def create_webhook(
+    owner: str,
+    repo: str,
+    webhook_url: str,
+    secret: str,
+    *,
+    token: str | None = None,
+    timeout: float = 15.0,
+) -> dict:
+    """저장소에 push 웹훅을 자동으로 등록한다.
+
+    호출자가 그 저장소의 admin 권한을 가진 토큰을 갖고 있어야 성공한다.
+    권한이 없으면 GitHub이 403/404를 반환하고, 이 함수는 예외를 던진다
+    (호출부에서 실패 시 수동 등록 안내로 대체해야 함).
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/hooks"
+    headers = {"Accept": "application/vnd.github+json"}
+    auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    payload = {
+        "name": "web",
+        "active": True,
+        "events": ["push"],
+        "config": {"url": webhook_url, "content_type": "json", "secret": secret},
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def get_default_branch(
+    owner: str,
+    repo: str,
+    *,
+    token: str | None = None,
+    timeout: float = 15.0,
+) -> str:
+    """저장소의 기본 브랜치 이름을 가져온다 (main/master 등 무엇이든 대응하기 위함)."""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+    headers = {"Accept": "application/vnd.github+json"}
+    auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.json().get("default_branch") or "main"
+
+
+_RELEVANT_EXTENSIONS = (".md", ".py")
+
+
+def _is_relevant_file(path: str) -> bool:
+    """초기 스캔 대상 파일인지 판단한다 (기획 문서 .md, 코드 .py, requirements.txt)."""
+    filename = path.rsplit("/", 1)[-1]
+    return path.endswith(_RELEVANT_EXTENSIONS) or filename == "requirements.txt"
+
+
+async def list_repo_files(
+    owner: str,
+    repo: str,
+    *,
+    branch: str,
+    token: str | None = None,
+    timeout: float = 20.0,
+) -> list[str]:
+    """저장소 안의 관련 파일(.md, .py, requirements.txt) 경로 목록을 가져온다.
+
+    초기 연결 시 "이미 있던 내용"을 스캔하기 위한 용도.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{branch}"
+    headers = {"Accept": "application/vnd.github+json"}
+    auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, headers=headers, params={"recursive": "1"})
+        resp.raise_for_status()
+        data = resp.json()
+
+    paths = []
+    for item in data.get("tree", []):
+        if item.get("type") == "blob":
+            path = item.get("path", "")
+            if _is_relevant_file(path):
+                paths.append(path)
+    return paths
+
+
+async def get_file_content(
+    owner: str,
+    repo: str,
+    path: str,
+    *,
+    token: str | None = None,
+    timeout: float = 15.0,
+) -> str:
+    """저장소 안의 특정 파일 전체 내용을 텍스트로 가져온다."""
+    import base64
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{path}"
+    headers = {"Accept": "application/vnd.github+json"}
+    auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    content_b64 = data.get("content", "")
+    if not content_b64:
+        return ""
+    try:
+        return base64.b64decode(content_b64).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
 def extract_push_event_info(payload: dict) -> dict:
+    """push 웹훅 payload에서 오케스트레이터가 필요로 하는 최소 정보를 추출한다."""
     repo_full = payload.get("repository", {}).get("full_name", "")
     owner, _, repo = repo_full.partition("/")
     head_commit = payload.get("head_commit") or {}
