@@ -112,8 +112,9 @@ async def create_webhook(
     """저장소에 push 웹훅을 자동으로 등록한다.
 
     호출자가 그 저장소의 admin 권한을 가진 토큰을 갖고 있어야 성공한다.
-    권한이 없으면 GitHub이 403/404를 반환하고, 이 함수는 예외를 던진다
-    (호출부에서 실패 시 수동 등록 안내로 대체해야 함).
+    이미 같은 URL로 웹훅이 등록돼 있으면 GitHub이 422("Hook already exists on this
+    repository")를 반환한다 — 이 경우 실제로는 실패가 아니라 이미 정상 연결된 상태이므로,
+    호출부에서 에러 메시지에 "already exists"가 포함돼 있는지 보고 구분해야 한다.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/hooks"
     headers = {"Accept": "application/vnd.github+json"}
@@ -128,7 +129,12 @@ async def create_webhook(
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("message") or resp.text[:200]
+            except Exception:
+                detail = resp.text[:200]
+            raise RuntimeError(f"GitHub 웹훅 등록 실패 ({resp.status_code}): {detail}")
         return resp.json()
 
 

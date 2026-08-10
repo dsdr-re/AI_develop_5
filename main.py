@@ -679,13 +679,17 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
     secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
     webhook_ok = False
+    webhook_already_exists = False
     webhook_error = ""
     try:
         await create_webhook(owner, repo_name, webhook_url, secret)
         webhook_ok = True
     except Exception as exc:
         webhook_error = str(exc)
-        logger.warning("웹훅 자동 등록 실패: %s/%s: %s", owner, repo_name, exc)
+        if "already exists" in webhook_error.lower():
+            webhook_already_exists = True
+        else:
+            logger.warning("웹훅 자동 등록 실패: %s/%s: %s", owner, repo_name, exc)
 
     background_tasks.add_task(_run_initial_scan, owner, repo_name)
 
@@ -693,6 +697,11 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
         status_box = (
             "<div class='box' style='background:#e3f5e9;'>웹훅이 자동으로 등록됐습니다. "
             "앞으로 이 저장소에 커밋이 생길 때마다 자동으로 분석됩니다.</div>"
+        )
+    elif webhook_already_exists:
+        status_box = (
+            "<div class='box' style='background:#e3f5e9;'>이 저장소에는 이미 웹훅이 등록되어 있습니다. "
+            "별도로 할 일은 없고, 앞으로도 커밋할 때마다 자동으로 분석됩니다.</div>"
         )
     else:
         status_box = (
