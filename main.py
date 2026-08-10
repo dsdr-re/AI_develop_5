@@ -4,13 +4,14 @@ import datetime
 import logging
 import os
 import re
+from collections import OrderedDict
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from agents.pipeline import run_pipeline
-from services.firestore_store import get_dashboard_stats, get_report, list_reports, save_report
+from services.firestore_store import get_dashboard_stats, get_report, list_reports, mark_resolved, save_report
 from services.github_client import (
     extract_push_event_info,
     get_commit_diff,
@@ -56,16 +57,12 @@ _PAGE_STYLE = """
   h1 { font-size: 20px; margin-bottom: 4px; font-weight: 500; }
   h2 { font-size: 16px; margin-top: 28px; margin-bottom: 8px; font-weight: 500; }
   .sub { color: #666; font-size: 14px; margin-top: 0; }
-  table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-  th, td { text-align: left; padding: 10px 12px; border-bottom: 0.5px solid #e5e5e5; font-size: 14px; }
-  th { color: #666; font-weight: 600; font-size: 13px; }
-  .badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }
-  .summary { color: #333; max-width: 320px; }
   a { color: #2563eb; text-decoration: none; }
   .empty { color: #888; padding: 40px 0; text-align: center; }
   .empty-inline { color: #888; font-size: 14px; }
   .back { display: inline-block; margin-bottom: 16px; font-size: 14px; color: #2563eb; cursor: pointer; }
   .box { background: #f7f7f8; border-radius: 10px; padding: 16px 18px; margin-top: 8px; font-size: 14px; line-height: 1.6; }
+  .badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }
   ul.patents { list-style: none; padding: 0; margin: 8px 0 0; }
   ul.patents li { padding: 12px 0; border-bottom: 0.5px solid #e5e5e5; }
   ul.patents .meta { color: #888; font-size: 13px; font-weight: normal; }
@@ -89,6 +86,15 @@ _PAGE_STYLE = """
   .feed-icon { color: #888; flex-shrink: 0; }
   .feed-title { font-size: 14px; font-weight: 500; margin: 0; }
   .feed-sub { font-size: 12px; color: #888; margin: 3px 0 0; }
+  .date-heading { font-size: 13px; font-weight: 500; color: #888; margin: 20px 0 8px; }
+  .group-box { border: 0.5px solid #e5e5e5; border-radius: 12px; overflow: hidden; margin-bottom: 4px; }
+  .row-link { text-decoration: none; color: inherit; display: flex; align-items: center;
+              gap: 12px; padding: 12px 16px; border-bottom: 0.5px solid #e5e5e5; }
+  .row-link:last-child { border-bottom: none; }
+  .row-title { font-size: 14px; font-weight: 500; margin: 0; color: #1a1a1a; }
+  .row-sub { font-size: 12px; color: #888; margin: 2px 0 0; }
+  .row-time { font-size: 13px; color: #666; white-space: nowrap; }
+  .status-tag { font-size: 12px; color: #888; margin-right: 4px; white-space: nowrap; }
 """
 
 
@@ -135,6 +141,29 @@ def _relative_time(dt: datetime.datetime | None) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def _date_bucket(dt: datetime.datetime | None) -> str:
+    if not dt:
+        return "날짜 미상"
+    now = datetime.datetime.now(datetime.timezone.utc)
+    today = now.date()
+    d = dt.date()
+    if d == today:
+        return "오늘"
+    if d == today - datetime.timedelta(days=1):
+        return "어제"
+    if (today - d).days < 7:
+        return "이번 주"
+    return dt.strftime("%Y-%m-%d")
+
+
+def _group_by_date(reports: list[dict]) -> "OrderedDict[str, list[dict]]":
+    groups: "OrderedDict[str, list[dict]]" = OrderedDict()
+    for r in reports:
+        bucket = _date_bucket(r.get("created_at"))
+        groups.setdefault(bucket, []).append(r)
+    return groups
+
+
 def _file_label(r: dict) -> str:
     files = r.get("changed_files") or []
     if not files:
@@ -142,6 +171,36 @@ def _file_label(r: dict) -> str:
     if len(files) == 1:
         return files[0]
     return f"{files[0]} 외 {len(files) - 1}개"
+
+
+def _render_grouped_list(reports: list[dict], *, show_status: bool) -> str:
+    if not reports:
+        return ""
+    groups = _group_by_date(reports)
+    out = []
+    for bucket, items in groups.items():
+        rows = []
+        for r in items:
+            risk = r.get("risk_level") or "unknown"
+            bg, text, label = _RISK_STYLE.get(risk, ("#eee", "#666", risk or "확인필요"))
+            msg = r.get("commit_message") or "(커밋 메시지 없음)"
+            file_label = _file_label(r)
+            created = r.get("created_at")
+            time_str = created.strftime("%H:%M") if created else ""
+            status = r.get("status") or "pending"
+            status_html = '<span class="status-tag">해결됨</span>' if (show_status and status == "resolved") else ""
+            detail_url = f"/reports/{r.get('id', '')}"
+            rows.append(
+                f"<a class='row-link' href='{detail_url}'>"
+                f"<span class='badge' style='background:{bg}; color:{text};'>{label}</span>"
+                f"<div style='flex:1;'><p class='row-title'>{msg}</p>"
+                f"<p class='row-sub'>{file_label}</p></div>"
+                f"{status_html}"
+                f"<span class='row-time'>{time_str}</span></a>"
+            )
+        out.append(f"<p class='date-heading'>{bucket}</p>")
+        out.append(f"<div class='group-box'>{''.join(rows)}</div>")
+    return "".join(out)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -158,7 +217,7 @@ async def dashboard_page():
         msg = r.get("commit_message") or "(커밋 메시지 없음)"
         rel_time = _relative_time(r.get("created_at"))
         cards.append(
-            f"<div class='feed-card' onclick=\"location.href='/reports/{r.get('id','')}'\" style='cursor:pointer;'>"
+            f"<div class='feed-card' onclick=\\"location.href='/reports/{r.get('id','')}'\\" style='cursor:pointer;'>"
             f"<span class='feed-icon'>{_icon_for(primary_file)}</span>"
             f"<div style='flex:1;'>"
             f"<p class='feed-title'>{file_label} — {msg}</p>"
@@ -181,12 +240,9 @@ async def dashboard_page():
     <div class="metric-card"><p class="metric-label">연결된 워크스페이스</p><p class="metric-value">{stats['workspace_count']}</p></div>
     <div class="metric-card"><p class="metric-label">전체 리포트</p><p class="metric-value">{stats['total_reports']}</p></div>
     <div class="metric-card"><p class="metric-label">이번 주 위험 발견</p><p class="metric-value" style="color:#c92a2a;">{stats['risky_this_week']}</p></div>
-    <div class="metric-card"><p class="metric-label">낮음 (안전)</p><p class="metric-value" style="color:#1a9c5b;">{stats['low_count']}</p></div>
+    <div class="metric-card"><p class="metric-label">검토 대기</p><p class="metric-value">{stats['pending_count']}</p></div>
   </div>
-  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
-    <p style="font-size:16px; font-weight:500; margin:0;">최근 탐지된 변경사항</p>
-    <a href="/reports" style="font-size:13px;">전체 이력 보기 →</a>
-  </div>
+  <p style="font-size:16px; font-weight:500; margin:0 0 12px;">최근 탐지된 변경사항</p>
   {cards_html}
 </body>
 </html>"""
@@ -194,51 +250,48 @@ async def dashboard_page():
 
 
 @app.get("/reports", response_class=HTMLResponse)
-async def reports_page():
-    reports = list_reports(limit=50)
+async def reports_page(view: str = "important"):
+    all_reports = list_reports(limit=200)
+    show_all = view == "all"
 
-    rows = []
-    for r in reports:
-        risk = r.get("risk_level") or "unknown"
-        bg, text, label = _RISK_STYLE.get(risk, ("#eee", "#666", risk or "확인필요"))
-        repo = r.get("repo_or_doc_id", "")
-        created = r.get("created_at")
-        created_str = created.strftime("%Y-%m-%d %H:%M") if created else ""
-        summary = ""
-        extracted = r.get("extracted_context")
-        if isinstance(extracted, dict):
-            summary = extracted.get("summary") or ""
-        msg = r.get("commit_message") or "(커밋 메시지 없음)"
-        file_label = _file_label(r)
-        detail_url = f"/reports/{r.get('id', '')}"
-        rows.append(
-            f"<tr><td><span class='badge' style='background:{bg}; color:{text};'>{label}</span></td>"
-            f"<td>{repo}</td>"
-            f"<td><a href='{detail_url}'>{msg}</a><div style='font-size:12px; color:#888; margin-top:2px;'>{file_label}</div></td>"
-            f"<td class='summary'>{summary}</td>"
-            f"<td>{created_str}</td></tr>"
-        )
+    if show_all:
+        reports = all_reports
+        title = "IP Sentinel 전체 리포트 이력"
+        sub = f"전체 {len(reports)}건 표시 중"
+        toggle_link = '<a href="/reports">&larr; 검토 대기만 보기</a>'
+        empty_msg = "아직 리포트가 없습니다. 커밋을 하나 올려서 웹훅이 동작하는지 확인해보세요."
+    else:
+        reports = [
+            r
+            for r in all_reports
+            if (r.get("status") or "pending") == "pending" and (r.get("risk_level") in ("medium", "high"))
+        ]
+        title = "IP Sentinel 리포트 이력"
+        sub = "검토 대기 중인 중간·높음 항목만 표시합니다."
+        toggle_link = '<a href="/reports?view=all">전체 이력 보기 →</a>'
+        empty_msg = "검토 대기 중인 항목이 없습니다. 모두 처리했습니다."
 
-    rows_html = "".join(rows) if rows else (
-        "<tr><td colspan='5' class='empty'>아직 리포트가 없습니다. "
-        "커밋을 하나 올려서 웹훅이 동작하는지 확인해보세요.</td></tr>"
-    )
+    list_html = _render_grouped_list(reports, show_status=show_all)
+    if not list_html:
+        list_html = f"<p class='empty' >{empty_msg}</p>"
 
     html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<title>IP Sentinel 리포트 이력</title>
+<title>{title}</title>
 <style>{_PAGE_STYLE}</style>
 </head>
 <body>
   {_nav_html('list')}
-  <h1>IP Sentinel 리포트 이력</h1>
-  <p class="sub">최근 {len(reports)}건. 변경사항을 클릭하면 상세 리포트를 볼 수 있습니다.</p>
-  <table>
-    <tr><th>위험도</th><th>저장소</th><th>변경사항</th><th>요약</th><th>시각</th></tr>
-    {rows_html}
-  </table>
+  <div style="display:flex; align-items:flex-start; justify-content:space-between;">
+    <div>
+      <h1>{title}</h1>
+      <p class="sub">{sub}</p>
+    </div>
+    <div style="font-size:13px; padding-top:4px;">{toggle_link}</div>
+  </div>
+  {list_html}
 </body>
 </html>"""
     return HTMLResponse(content=html)
@@ -259,6 +312,7 @@ async def report_detail_page(report_id: str):
     file_label = _file_label(r)
     created = r.get("created_at")
     created_str = created.strftime("%Y-%m-%d %H:%M") if created else ""
+    status = r.get("status") or "pending"
 
     extracted = r.get("extracted_context")
     summary = extracted.get("summary") if isinstance(extracted, dict) else ""
@@ -276,11 +330,11 @@ async def report_detail_page(report_id: str):
     def _render_patent_item(m: dict) -> str:
         title = m.get("title") or "(제목 없음)"
         app_no = m.get("application_number") or "번호 미상"
-        status = m.get("registration_status") or "상태 미상"
+        p_status = m.get("registration_status") or "상태 미상"
         note = m.get("relevance_note") or ""
         return (
             f"<li><strong>{title}</strong><br>"
-            f"<span class='meta'>출원번호 {app_no} · 등록상태 {status}</span>"
+            f"<span class='meta'>출원번호 {app_no} · 등록상태 {p_status}</span>"
             f"<div class='note'>{note}</div></li>"
         )
 
@@ -303,6 +357,15 @@ async def report_detail_page(report_id: str):
             f"<ul class='patents'>{raw_items}</ul></details>"
         )
 
+    if status == "resolved":
+        status_html = "<span class='badge' style='background:#e3f5e9; color:#1a7f37;'>해결됨</span>"
+    else:
+        status_html = (
+            "<span class='badge' style='background:#f0f0f0; color:#666;'>검토 대기</span>"
+            f"<form method='post' action='/reports/{report_id}/resolve' style='display:inline; margin-left:8px;'>"
+            "<button type='submit'>검토 완료로 표시</button></form>"
+        )
+
     html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -313,9 +376,12 @@ async def report_detail_page(report_id: str):
 <body>
   {_nav_html('list')}
   <span class="back" onclick="history.back()">&larr; 뒤로</span>
-  <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
-    <span class='badge' style='background:{bg}; color:{text};'>{label}</span>
-    <span style="font-size:16px; font-weight:500;">{msg}</span>
+  <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:4px;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span class='badge' style='background:{bg}; color:{text};'>{label}</span>
+      <span style="font-size:16px; font-weight:500;">{msg}</span>
+    </div>
+    <div>{status_html}</div>
   </div>
   <p class="sub">{repo} · {created_str} · 변경 파일: {file_label}
     · <a href="{github_url}" target="_blank" rel="noopener">GitHub에서 보기 →</a></p>
@@ -334,6 +400,13 @@ async def report_detail_page(report_id: str):
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
+@app.post("/reports/{report_id}/resolve")
+async def resolve_report(report_id: str):
+    mark_resolved(report_id)
+    return RedirectResponse(url=f"/reports/{report_id}", status_code=303)
+
 
 def _extract_changed_files(diff_text: str) -> list[str]:
     return re.findall(r"^--- (.+?) ---$", diff_text, re.MULTILINE)

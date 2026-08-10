@@ -37,6 +37,7 @@ def save_report(
             "commit_message": commit_message,
             "changed_files": changed_files or [],
             "risk_level": (report.get("risk_assessment") or {}).get("risk_level"),
+            "status": "pending",
             "extracted_context": report.get("extracted_context"),
             "patent_search_results": report.get("patent_search_results"),
             "risk_assessment": report.get("risk_assessment"),
@@ -47,19 +48,13 @@ def save_report(
     return doc_id
 
 
-def list_reports(
-    *,
-    repo_or_doc_id: str | None = None,
-    min_risk_level: str | None = None,
-    limit: int = 50,
-) -> list[dict]:
-    query = _get_client().collection(_COLLECTION)
-    if repo_or_doc_id:
-        query = query.where("repo_or_doc_id", "==", repo_or_doc_id)
-    if min_risk_level:
-        query = query.where("risk_level", "==", min_risk_level)
-    query = query.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
-
+def list_reports(limit: int = 200) -> list[dict]:
+    query = (
+        _get_client()
+        .collection(_COLLECTION)
+        .order_by("created_at", direction=firestore.Query.DESCENDING)
+        .limit(limit)
+    )
     docs = query.stream()
     return [{"id": d.id, **d.to_dict()} for d in docs]
 
@@ -71,6 +66,10 @@ def get_report(report_id: str) -> dict | None:
     return {"id": doc.id, **doc.to_dict()}
 
 
+def mark_resolved(report_id: str) -> None:
+    _get_client().collection(_COLLECTION).document(report_id).update({"status": "resolved"})
+
+
 def get_dashboard_stats() -> dict:
     docs = _get_client().collection(_COLLECTION).stream()
     all_reports = [d.to_dict() for d in docs]
@@ -80,7 +79,7 @@ def get_dashboard_stats() -> dict:
 
     repos: set[str] = set()
     total = 0
-    low_count = 0
+    pending_count = 0
     risky_this_week = 0
 
     for r in all_reports:
@@ -88,16 +87,16 @@ def get_dashboard_stats() -> dict:
         if r.get("repo_or_doc_id"):
             repos.add(r["repo_or_doc_id"])
         risk = r.get("risk_level") or "low"
-        if risk == "low":
-            low_count += 1
+        status = r.get("status") or "pending"
+        if status == "pending" and risk in ("medium", "high"):
+            pending_count += 1
         created = r.get("created_at")
-        if created and risk in ("medium", "high"):
-            if created >= week_ago:
-                risky_this_week += 1
+        if created and risk in ("medium", "high") and created >= week_ago:
+            risky_this_week += 1
 
     return {
         "workspace_count": len(repos),
         "total_reports": total,
         "risky_this_week": risky_this_week,
-        "low_count": low_count,
+        "pending_count": pending_count,
     }
