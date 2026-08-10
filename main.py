@@ -1,5 +1,6 @@
 """IP Sentinel Cloud Run 엔트리포인트."""
 
+import asyncio
 import datetime
 import logging
 import os
@@ -611,9 +612,11 @@ async def connect_page():
 
 async def _run_initial_scan(owner: str, repo: str) -> None:
     """저장소를 처음 연결했을 때, 이미 있던 관련 파일(.md/.py/requirements.txt)을
-    전부 훑어서 리포트를 만든다. KIPRIS/Gemini 호출량 보호를 위해 파일 수를 제한한다.
+    전부 훑어서 리포트를 만든다. KIPRIS/Gemini 호출량 보호를 위해 파일 수를 제한하고,
+    파일 사이에 짧은 텀을 둬서 KIPRIS 서버에 연달아 몰아치지 않게 한다.
     """
     MAX_FILES = 15
+    DELAY_BETWEEN_FILES = 2.0
     try:
         branch = await get_default_branch(owner, repo)
         files = await list_repo_files(owner, repo, branch=branch)
@@ -628,6 +631,8 @@ async def _run_initial_scan(owner: str, repo: str) -> None:
         if scanned >= MAX_FILES:
             logger.info("initial scan: MAX_FILES(%d) 도달, 나머지 %d개는 건너뜀", MAX_FILES, len(files) - scanned)
             break
+        if scanned > 0:
+            await asyncio.sleep(DELAY_BETWEEN_FILES)
         try:
             content = await get_file_content(owner, repo, path)
         except Exception:
