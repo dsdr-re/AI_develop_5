@@ -266,24 +266,42 @@ async def report_detail_page(report_id: str):
     risk_assessment = r.get("risk_assessment")
     rationale = risk_assessment.get("rationale") if isinstance(risk_assessment, dict) else ""
     recommended_action = risk_assessment.get("recommended_action") if isinstance(risk_assessment, dict) else ""
+    related_patent_numbers = (
+        set(risk_assessment.get("related_patents") or []) if isinstance(risk_assessment, dict) else set()
+    )
 
     patent_results = r.get("patent_search_results")
-    matches_html = "<p class='empty-inline'>참고한 특허가 없습니다.</p>"
-    if isinstance(patent_results, dict):
-        matches = patent_results.get("matches") or []
-        if matches:
-            items = []
-            for m in matches:
-                title = m.get("title") or "(제목 없음)"
-                app_no = m.get("application_number") or "번호 미상"
-                status = m.get("registration_status") or "상태 미상"
-                note = m.get("relevance_note") or ""
-                items.append(
-                    f"<li><strong>{title}</strong><br>"
-                    f"<span class='meta'>출원번호 {app_no} · 등록상태 {status}</span>"
-                    f"<div class='note'>{note}</div></li>"
-                )
-            matches_html = "<ul class='patents'>" + "".join(items) + "</ul>"
+    all_matches = (patent_results.get("matches") or []) if isinstance(patent_results, dict) else []
+
+    def _render_patent_item(m: dict) -> str:
+        title = m.get("title") or "(제목 없음)"
+        app_no = m.get("application_number") or "번호 미상"
+        status = m.get("registration_status") or "상태 미상"
+        note = m.get("relevance_note") or ""
+        return (
+            f"<li><strong>{title}</strong><br>"
+            f"<span class='meta'>출원번호 {app_no} · 등록상태 {status}</span>"
+            f"<div class='note'>{note}</div></li>"
+        )
+
+    relevant_matches = [m for m in all_matches if m.get("application_number") in related_patent_numbers]
+    other_matches = [m for m in all_matches if m.get("application_number") not in related_patent_numbers]
+
+    if relevant_matches:
+        matches_html = "<ul class='patents'>" + "".join(_render_patent_item(m) for m in relevant_matches) + "</ul>"
+    elif all_matches:
+        matches_html = "<p class='empty-inline'>검색은 됐지만, 실제로 관련성이 높다고 판단된 특허는 없습니다.</p>"
+    else:
+        matches_html = "<p class='empty-inline'>참고한 특허가 없습니다.</p>"
+
+    if other_matches:
+        raw_items = "".join(_render_patent_item(m) for m in other_matches)
+        matches_html += (
+            f"<details style='margin-top:12px;'>"
+            f"<summary style='cursor:pointer; font-size:13px; color:#666;'>"
+            f"검색은 됐지만 관련성 낮다고 판단된 특허 더보기 ({len(other_matches)}건)</summary>"
+            f"<ul class='patents'>{raw_items}</ul></details>"
+        )
 
     html = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -316,7 +334,6 @@ async def report_detail_page(report_id: str):
 </body>
 </html>"""
     return HTMLResponse(content=html)
-
 
 def _extract_changed_files(diff_text: str) -> list[str]:
     return re.findall(r"^--- (.+?) ---$", diff_text, re.MULTILINE)
