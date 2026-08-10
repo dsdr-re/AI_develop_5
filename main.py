@@ -217,7 +217,7 @@ async def dashboard_page():
         msg = r.get("commit_message") or "(커밋 메시지 없음)"
         rel_time = _relative_time(r.get("created_at"))
         cards.append(
-            f"<div class='feed-card' onclick=\\"location.href='/reports/{r.get('id','')}'\\" style='cursor:pointer;'>"
+            f"<div class='feed-card' onclick=\"location.href='/reports/{r.get('id','')}'\" style='cursor:pointer;'>"
             f"<span class='feed-icon'>{_icon_for(primary_file)}</span>"
             f"<div style='flex:1;'>"
             f"<p class='feed-title'>{file_label} — {msg}</p>"
