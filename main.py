@@ -614,9 +614,11 @@ async def _run_initial_scan(owner: str, repo: str) -> None:
     """저장소를 처음 연결했을 때, 이미 있던 관련 파일(.md/.py/requirements.txt)을
     전부 훑어서 리포트를 만든다. KIPRIS/Gemini 호출량 보호를 위해 파일 수를 제한하고,
     파일 사이에 짧은 텀을 둬서 KIPRIS 서버에 연달아 몰아치지 않게 한다.
+    같은 저장소를 다시 연결해도 이미 스캔한 파일은 건너뛴다(중복 방지).
     """
     MAX_FILES = 15
     DELAY_BETWEEN_FILES = 2.0
+    repo_id = f"{owner}/{repo}"
     try:
         branch = await get_default_branch(owner, repo)
         files = await list_repo_files(owner, repo, branch=branch)
@@ -624,7 +626,18 @@ async def _run_initial_scan(owner: str, repo: str) -> None:
         logger.exception("initial scan: failed to list files for %s/%s", owner, repo)
         return
 
-    logger.info("initial scan: %s/%s에서 관련 파일 %d개 발견, 최대 %d개까지 스캔", owner, repo, len(files), MAX_FILES)
+    # 이 저장소에 대해 이미 초기 스캔으로 만들어진 리포트가 있으면 그 파일들은 건너뛴다.
+    already_scanned = {
+        r.get("trigger_ref")
+        for r in list_reports(limit=200)
+        if r.get("repo_or_doc_id") == repo_id and (r.get("trigger_ref") or "").startswith("initial-scan:")
+    }
+    files = [p for p in files if f"initial-scan:{p}" not in already_scanned]
+
+    logger.info(
+        "initial scan: %s에서 관련 파일 %d개 발견(이미 스캔한 것 제외), 최대 %d개까지 스캔",
+        repo_id, len(files), MAX_FILES,
+    )
 
     scanned = 0
     for path in files:
