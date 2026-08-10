@@ -12,6 +12,8 @@ import logging
 
 import httpx
 
+from services.license_knowledge import retrieve_license_doc
+
 logger = logging.getLogger("ip-sentinel.license_client")
 
 DEPS_DEV_BASE_URL = "https://api.deps.dev/v3"
@@ -80,12 +82,14 @@ async def get_pypi_license(package_name: str, version: str | None = None) -> dic
             licenses = ver_data.get("licenses") or []
             license_str = ", ".join(licenses) if licenses else ""
             risk, note = classify_license(license_str)
+            detailed_obligations = retrieve_license_doc(license_str) if risk == "주의" else ""
             return {
                 "name": package_name,
                 "version": version,
                 "license": license_str or "확인 불가",
                 "risk": risk,
                 "note": note,
+                "detailed_obligations": detailed_obligations,
             }
         except httpx.HTTPError as exc:
             logger.warning("deps.dev 조회 실패: %s: %s", package_name, exc)
