@@ -130,12 +130,71 @@ async def create_webhook(
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code >= 400:
+            detail = resp.text[:200]
             try:
-                detail = resp.json().get("message") or resp.text[:200]
+                body = resp.json()
+                detail = body.get("message") or detail
+                # GitHub 422 응답은 진짜 이유(예: "Hook already exists on this repository")를
+                # 겉의 message가 아니라 errors[].message 안에 넣어서 준다. 이걸 놓치면
+                # "이미 등록됨"을 감지하지 못해 정상 상황도 실패로 잘못 표시된다.
+                sub_messages = [
+                    e.get("message") for e in (body.get("errors") or []) if isinstance(e, dict) and e.get("message")
+                ]
+                if sub_messages:
+                    detail = f"{detail}: {'; '.join(sub_messages)}"
             except Exception:
-                detail = resp.text[:200]
+                pass
             raise RuntimeError(f"GitHub 웹훅 등록 실패 ({resp.status_code}): {detail}")
         return resp.json()
+
+
+async def find_webhook_id(
+    owner: str,
+    repo: str,
+    webhook_url: str,
+    *,
+    token: str | None = None,
+    timeout: float = 15.0,
+) -> int | None:
+    """저장소에 등록된 웹훅 중 우리 URL과 일치하는 것의 ID를 찾는다.
+
+    create_webhook이 "이미 존재함"으로 실패했을 때, 그 기존 웹훅을 우리 추적
+    목록에 편입(adopt)시키기 위한 용도 — 그래야 나중에 연결 해제도 가능해진다.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/hooks"
+    headers = {"Accept": "application/vnd.github+json"}
+    auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        hooks = resp.json()
+    for h in hooks:
+        if isinstance(h, dict) and h.get("config", {}).get("url") == webhook_url:
+            return h.get("id")
+    return None
+
+
+async def delete_webhook(
+    owner: str,
+    repo: str,
+    hook_id: int,
+    *,
+    token: str | None = None,
+    timeout: float = 15.0,
+) -> None:
+    """저장소에서 웹훅을 실제로 삭제한다 (연결 해제)."""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/hooks/{hook_id}"
+    headers = {"Accept": "application/vnd.github+json"}
+    auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.delete(url, headers=headers)
+        # 404는 "이미 없음" — 결과적으로 목표(웹훅 없음)는 달성된 것이므로 에러 취급 안 함
+        if resp.status_code not in (204, 404):
+            raise RuntimeError(f"GitHub 웹훅 삭제 실패 ({resp.status_code}): {resp.text[:200]}")
 
 
 async def get_default_branch(

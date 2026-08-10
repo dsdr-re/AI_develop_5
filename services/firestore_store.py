@@ -14,6 +14,7 @@ import uuid
 from google.cloud import firestore
 
 _COLLECTION = os.environ.get("FIRESTORE_COLLECTION", "ip_sentinel_reports")
+_CONNECTED_REPOS_COLLECTION = "ip_sentinel_connected_repos"
 _client: firestore.Client | None = None
 
 
@@ -105,15 +106,12 @@ def get_dashboard_stats() -> dict:
     now = datetime.datetime.now(datetime.timezone.utc)
     week_ago = now - datetime.timedelta(days=7)
 
-    repos: set[str] = set()
     total = 0
     pending_count = 0
     risky_this_week = 0
 
     for r in all_reports:
         total += 1
-        if r.get("repo_or_doc_id"):
-            repos.add(r["repo_or_doc_id"])
         risk = r.get("risk_level") or "low"
         status = r.get("status") or "pending"
         if status == "pending" and risk in ("medium", "high"):
@@ -123,8 +121,42 @@ def get_dashboard_stats() -> dict:
             risky_this_week += 1
 
     return {
-        "workspace_count": len(repos),
         "total_reports": total,
         "risky_this_week": risky_this_week,
         "pending_count": pending_count,
     }
+
+
+def add_connected_repo(repo: str, *, webhook_id: int | None = None) -> str:
+    """저장소를 '연결됨' 상태로 진짜로 기록한다. 리포트 존재 여부로 추측하는 방식은
+    Firestore를 지워도 GitHub 웹훅은 그대로 남아있어 부정확했다 — 이 컬렉션이 진실의 원천."""
+    doc_id = str(uuid.uuid4())
+    _get_client().collection(_CONNECTED_REPOS_COLLECTION).document(doc_id).set(
+        {
+            "repo": repo,
+            "webhook_id": webhook_id,
+            "connected_at": datetime.datetime.now(datetime.timezone.utc),
+        }
+    )
+    return doc_id
+
+
+def list_connected_repos() -> list[dict]:
+    docs = _get_client().collection(_CONNECTED_REPOS_COLLECTION).stream()
+    return [{"id": d.id, **d.to_dict()} for d in docs]
+
+
+def get_connected_repo(repo: str) -> dict | None:
+    for r in list_connected_repos():
+        if r.get("repo") == repo:
+            return r
+    return None
+
+
+def remove_connected_repo(repo: str) -> None:
+    """연결 해제 — 이 함수만으로는 GitHub 웹훅 자체는 안 지워진다.
+    호출부(main.py)에서 delete_webhook과 함께 호출해야 진짜로 끊어진다."""
+    for r in list_connected_repos():
+        if r.get("repo") == repo:
+            _get_client().collection(_CONNECTED_REPOS_COLLECTION).document(r["id"]).delete()
+            return

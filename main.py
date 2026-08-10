@@ -13,16 +13,22 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from agents.pipeline import run_pipeline
 from services.firestore_store import (
+    add_connected_repo,
+    get_connected_repo,
     get_dashboard_stats,
     get_report,
+    list_connected_repos,
     list_reports,
     mark_pending,
     mark_resolved,
+    remove_connected_repo,
     save_report,
 )
 from services.github_client import (
     create_webhook,
+    delete_webhook,
     extract_push_event_info,
+    find_webhook_id,
     get_commit_diff,
     get_default_branch,
     get_file_content,
@@ -255,6 +261,7 @@ def _render_grouped_list(reports: list[dict], *, show_status: bool) -> str:
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_page():
     stats = get_dashboard_stats()
+    workspace_count = len(list_connected_repos())
     recent = list_reports(limit=3)
 
     cards = []
@@ -286,7 +293,7 @@ async def dashboard_page():
 <body>
   {_nav_html('dashboard')}
   <div class="metric-grid">
-    <div class="metric-card"><p class="metric-label">연결된 워크스페이스</p><p class="metric-value">{stats['workspace_count']}</p></div>
+    <div class="metric-card"><p class="metric-label">연결된 워크스페이스</p><p class="metric-value">{workspace_count}</p></div>
     <div class="metric-card"><p class="metric-label">전체 리포트</p><p class="metric-value">{stats['total_reports']}</p></div>
     <div class="metric-card"><p class="metric-label">이번 주 위험 발견</p><p class="metric-value" style="color:#c92a2a;">{stats['risky_this_week']}</p></div>
     <div class="metric-card"><p class="metric-label">검토 대기</p><p class="metric-value">{stats['pending_count']}</p></div>
@@ -588,6 +595,28 @@ def _format_as_synthetic_diff(filename: str, content: str) -> str:
 
 @app.get("/connect", response_class=HTMLResponse)
 async def connect_page():
+    connected = list_connected_repos()
+    rows = []
+    for r in connected:
+        connected_at = _to_kst(r.get("connected_at"))
+        time_str = connected_at.strftime("%Y-%m-%d %H:%M") if connected_at else ""
+        rows.append(
+            "<div style='display:flex; align-items:center; justify-content:space-between; "
+            "padding:12px 16px; border-bottom:0.5px solid #e5e5e5;'>"
+            f"<div><p style='font-size:14px; font-weight:500; margin:0;'>{r.get('repo')}</p>"
+            f"<p style='font-size:12px; color:#888; margin:2px 0 0;'>{time_str} 연결됨</p></div>"
+            "<form method='post' action='/connect/disconnect'>"
+            f"<input type='hidden' name='repo' value='{r.get('repo')}'>"
+            "<button type='submit' style='font-size:13px; color:#c92a2a; background:white; "
+            "border:1px solid #f0c0c0; padding:6px 12px; border-radius:8px; cursor:pointer;'>연결 해제</button>"
+            "</form></div>"
+        )
+    connected_html = (
+        f"<div style='border:0.5px solid #e5e5e5; border-radius:12px; overflow:hidden; margin-bottom:32px;'>{''.join(rows)}</div>"
+        if rows
+        else "<p class='empty-inline' style='margin-bottom:32px;'>연결된 저장소가 없습니다.</p>"
+    )
+
     html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -598,9 +627,14 @@ async def connect_page():
 <body>
   {_nav_html('connect')}
   <h1>GitHub 저장소 연결</h1>
+
+  <h2>연결된 저장소</h2>
+  {connected_html}
+
+  <h2>새 저장소 연결</h2>
   <p class="sub">owner/repo 형식으로 입력하세요 (예: dsdr-re/AI_develop_5). 연결하면 웹훅을
     자동으로 등록하고, 이미 저장소에 있던 기획 문서·코드도 한 번 훑어 리포트를 만듭니다.</p>
-  <form method="post" action="/connect" style="margin-top:20px; display:flex; gap:8px;">
+  <form method="post" action="/connect" style="margin-top:12px; display:flex; gap:8px;">
     <input type="text" name="repo" placeholder="owner/repo" required
       style="padding:8px 12px; width:280px; border:0.5px solid #ccc; border-radius:8px; font-size:14px;">
     <button type="submit" class="btn-primary">연결하기</button>
@@ -610,13 +644,29 @@ async def connect_page():
     return HTMLResponse(content=html)
 
 
+@app.post("/connect/disconnect")
+async def disconnect_repo(repo: str = Form(...)):
+    """저장소 연결을 진짜로 해제한다 — GitHub 웹훅도 실제로 삭제하고, 우리 추적 목록에서도 뺀다."""
+    existing = get_connected_repo(repo)
+    if existing:
+        owner, _, repo_name = repo.partition("/")
+        webhook_id = existing.get("webhook_id")
+        if webhook_id:
+            try:
+                await delete_webhook(owner, repo_name, webhook_id)
+            except Exception:
+                logger.exception("failed to delete webhook for %s (id=%s)", repo, webhook_id)
+        remove_connected_repo(repo)
+    return RedirectResponse(url="/connect", status_code=303)
+
+
 async def _run_initial_scan(owner: str, repo: str) -> None:
     """저장소를 처음 연결했을 때, 이미 있던 관련 파일(.md/.py/requirements.txt)을
     전부 훑어서 리포트를 만든다. KIPRIS/Gemini 호출량 보호를 위해 파일 수를 제한하고,
     파일 사이에 짧은 텀을 둬서 KIPRIS 서버에 연달아 몰아치지 않게 한다.
     같은 저장소를 다시 연결해도 이미 스캔한 파일은 건너뛴다(중복 방지).
     """
-    MAX_FILES = 15
+    MAX_FILES = 5  # 한 번에 너무 많이 하면 KIPRIS 부하 + Cloud Run 5분 타임아웃 위험. 이어서 스캔 가능.
     DELAY_BETWEEN_FILES = 2.0
     repo_id = f"{owner}/{repo}"
     try:
@@ -691,35 +741,58 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
     webhook_url = str(request.base_url).rstrip("/") + "/webhook/github"
     secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
+    already_tracked = get_connected_repo(repo) is not None
+
     webhook_ok = False
     webhook_already_exists = False
     webhook_error = ""
-    try:
-        await create_webhook(owner, repo_name, webhook_url, secret)
+
+    if already_tracked:
+        # 이미 우리 목록에 있으면 GitHub API를 또 두드릴 필요가 없다 (이 자체도
+        # KIPRIS처럼 과도한 외부 호출을 줄이려는 목적).
         webhook_ok = True
-    except Exception as exc:
-        webhook_error = str(exc)
-        if "already exists" in webhook_error.lower():
-            webhook_already_exists = True
-        else:
-            logger.warning("웹훅 자동 등록 실패: %s/%s: %s", owner, repo_name, exc)
+    else:
+        try:
+            result = await create_webhook(owner, repo_name, webhook_url, secret)
+            add_connected_repo(repo, webhook_id=result.get("id"))
+            webhook_ok = True
+        except Exception as exc:
+            webhook_error = str(exc)
+            if "already exists" in webhook_error.lower():
+                # GitHub엔 이미 있는데 우리 목록엔 없던 경우 (예: 오늘 낮에 수동 등록한 것) —
+                # 기존 웹훅 ID를 찾아서 우리 추적 목록에 편입시킨다.
+                webhook_already_exists = True
+                try:
+                    hook_id = await find_webhook_id(owner, repo_name, webhook_url)
+                    add_connected_repo(repo, webhook_id=hook_id)
+                except Exception:
+                    logger.exception("failed to adopt existing webhook for %s", repo)
+                    add_connected_repo(repo, webhook_id=None)
+            else:
+                logger.warning("웹훅 자동 등록 실패: %s/%s: %s", owner, repo_name, exc)
 
     background_tasks.add_task(_run_initial_scan, owner, repo_name)
 
-    if webhook_ok:
+    if already_tracked:
+        status_box = (
+            "<div class='box' style='background:#e3f5e9;'>이미 연결된 저장소입니다. "
+            "새로 생긴 파일이 있으면 백그라운드에서 마저 스캔합니다.</div>"
+        )
+    elif webhook_ok:
         status_box = (
             "<div class='box' style='background:#e3f5e9;'>웹훅이 자동으로 등록됐습니다. "
             "앞으로 이 저장소에 커밋이 생길 때마다 자동으로 분석됩니다.</div>"
         )
     elif webhook_already_exists:
         status_box = (
-            "<div class='box' style='background:#e3f5e9;'>이 저장소에는 이미 웹훅이 등록되어 있습니다. "
-            "별도로 할 일은 없고, 앞으로도 커밋할 때마다 자동으로 분석됩니다.</div>"
+            "<div class='box' style='background:#e3f5e9;'>이 저장소에는 이미 웹훅이 등록되어 있어, "
+            "연결 목록에 추가했습니다. 앞으로도 커밋할 때마다 자동으로 분석됩니다.</div>"
         )
     else:
         status_box = (
             "<div class='box' style='background:#fdf1de;'>웹훅 자동 등록에 실패했습니다 "
-            f"({webhook_error}). 아래 정보로 GitHub 저장소 Settings → Webhooks에서 직접 등록해주세요.<br><br>"
+            f"({webhook_error}). 아래 정보로 GitHub 저장소 Settings → Webhooks에서 직접 등록한 뒤, "
+            "이 페이지에서 다시 연결하기를 눌러주세요.<br><br>"
             f"<b>Payload URL:</b> {webhook_url}<br>"
             "<b>Content type:</b> application/json<br>"
             "<b>Secret:</b> (Secret Manager의 github-webhook-secret 값)</div>"
@@ -736,8 +809,10 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
   {_nav_html('connect')}
   <h1>{owner}/{repo_name} 연결 처리 중</h1>
   {status_box}
-  <p class="sub" style="margin-top:16px;">이미 있던 파일들을 백그라운드에서 스캔하고 있습니다 (최대 15개,
-    몇 분 정도 걸릴 수 있습니다). <a href="/reports?view=all">전체 이력에서 진행 확인 →</a></p>
+  <p class="sub" style="margin-top:16px;">이미 있던 파일들을 백그라운드에서 스캔하고 있습니다 (한 번에 최대 5개,
+    이미 스캔한 파일은 건너뜁니다. 5개 넘게 남아있으면 이 페이지에서 다시 연결하기를 눌러 이어서 스캔하세요).
+    <a href="/reports?view=all">전체 이력에서 진행 확인 →</a>
+    · <a href="/connect">연결 목록으로 →</a></p>
 </body>
 </html>"""
     return HTMLResponse(content=html)
