@@ -1,4 +1,4 @@
-"""IP Sentinel Cloud Run 엔트리포인트."""
+"""IP DETECDOG Cloud Run 엔트리포인트."""
 
 import asyncio
 import datetime
@@ -10,6 +10,7 @@ from collections import OrderedDict
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from agents.pipeline import run_pipeline
 from services.firestore_store import (
@@ -42,7 +43,8 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ip-sentinel")
 
-app = FastAPI(title="IP Sentinel")
+app = FastAPI(title="IP DETECDOG")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/health")
@@ -95,9 +97,9 @@ _PAGE_STYLE = """
   .navbar { display: flex; align-items: center; justify-content: space-between;
             padding-bottom: 16px; border-bottom: 0.5px solid #e5e5e5; margin-bottom: 24px; }
   .navbar-left { display: flex; align-items: center; gap: 10px; }
-  .navbar-icon { width: 32px; height: 32px; border-radius: 8px; background: #DBEAFE;
-                 display: flex; align-items: center; justify-content: center; color: #2563EB; }
-  .navbar-title { font-size: 16px; font-weight: 500; }
+  .navbar-icon { width: 32px; height: 32px; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
+  .navbar-icon img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .navbar-title { font-size: 16px; font-weight: 600; letter-spacing: 0.2px; }
   .navbar-links { display: flex; gap: 20px; }
   .navbar-links a { font-size: 14px; color: #666; padding-bottom: 2px; }
   .navbar-links a.active { color: #2563EB; font-weight: 500; border-bottom: 2px solid #2563EB; }
@@ -147,12 +149,9 @@ def _nav_html(active: str) -> str:
 <div class="navbar">
   <div class="navbar-left">
     <div class="navbar-icon">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-           stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-      </svg>
+      <img src="/static/logo.png" alt="IP DETECDOG 로고">
     </div>
-    <span class="navbar-title">IP-Sentinel</span>
+    <span class="navbar-title">IP DETECDOG</span>
   </div>
   <div class="navbar-links">
     <a href="/" class="{dash_cls}">대시보드</a>
@@ -287,7 +286,7 @@ async def dashboard_page():
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<title>IP Sentinel 대시보드</title>
+<title>IP DETECDOG 대시보드</title>
 <style>{_PAGE_STYLE}</style>
 </head>
 <body>
@@ -312,7 +311,7 @@ async def reports_page(view: str = "important"):
 
     if show_all:
         reports = all_reports
-        title = "IP Sentinel 전체 리포트 이력"
+        title = "IP DETECDOG 전체 리포트 이력"
         sub = f"전체 {len(reports)}건 표시 중"
         toggle_link = '<a href="/reports">&larr; 검토 대기만 보기</a>'
         empty_msg = "아직 리포트가 없습니다. 커밋을 하나 올려서 웹훅이 동작하는지 확인해보세요."
@@ -322,7 +321,7 @@ async def reports_page(view: str = "important"):
             for r in all_reports
             if (r.get("status") or "pending") == "pending" and (r.get("risk_level") in ("medium", "high"))
         ]
-        title = "IP Sentinel 리포트 이력"
+        title = "IP DETECDOG 리포트 이력"
         sub = "검토 대기 중인 중간·높음 항목만 표시합니다."
         toggle_link = '<a href="/reports?view=all">전체 이력 보기 →</a>'
         empty_msg = "검토 대기 중인 항목이 없습니다. 모두 처리했습니다."
@@ -518,7 +517,7 @@ async def report_detail_page(report_id: str):
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<title>IP Sentinel 리포트 상세</title>
+<title>IP DETECDOG 리포트 상세</title>
 <style>{_PAGE_STYLE}</style>
 </head>
 <body>
@@ -623,11 +622,17 @@ async def connect_page():
             "padding:12px 16px; border-bottom:0.5px solid #e5e5e5;'>"
             f"<div><p style='font-size:14px; font-weight:500; margin:0;'>{r.get('repo')}</p>"
             f"<p style='font-size:12px; color:#888; margin:2px 0 0;'>{time_str} 연결됨</p></div>"
+            "<div style='display:flex; gap:8px;'>"
+            "<form method='post' action='/connect/scan'>"
+            f"<input type='hidden' name='repo' value='{r.get('repo')}'>"
+            "<button type='submit' class='btn-status-pending' style='padding:6px 12px; font-size:13px;'>"
+            "초기 스캔 시작</button>"
+            "</form>"
             "<form method='post' action='/connect/disconnect'>"
             f"<input type='hidden' name='repo' value='{r.get('repo')}'>"
             "<button type='submit' style='font-size:13px; color:#c92a2a; background:white; "
             "border:1px solid #f0c0c0; padding:6px 12px; border-radius:8px; cursor:pointer;'>연결 해제</button>"
-            "</form></div>"
+            "</form></div></div>"
         )
     connected_html = (
         f"<div style='border:0.5px solid #e5e5e5; border-radius:12px; overflow:hidden; margin-bottom:32px;'>{''.join(rows)}</div>"
@@ -675,6 +680,19 @@ async def disconnect_repo(repo: str = Form(...)):
             except Exception:
                 logger.exception("failed to delete webhook for %s (id=%s)", repo, webhook_id)
         remove_connected_repo(repo)
+    return RedirectResponse(url="/connect", status_code=303)
+
+
+@app.post("/connect/scan")
+async def trigger_scan(background_tasks: BackgroundTasks, repo: str = Form(...)):
+    """"초기 스캔 시작" 버튼 전용 — 연결(웹훅 등록)과 완전히 분리된 동작.
+
+    KIPRIS가 불안정할 때는 연결만 먼저 해두고, 스캔은 상황이 나아졌을 때
+    이 버튼으로 따로 다시 시도할 수 있게 하기 위함. 이미 스캔한 파일은
+    _run_initial_scan 내부의 중복 방지 로직이 알아서 건너뛴다.
+    """
+    owner, _, repo_name = repo.partition("/")
+    background_tasks.add_task(_run_initial_scan, owner, repo_name)
     return RedirectResponse(url="/connect", status_code=303)
 
 
@@ -789,22 +807,22 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
             else:
                 logger.warning("웹훅 자동 등록 실패: %s/%s: %s", owner, repo_name, exc)
 
-    background_tasks.add_task(_run_initial_scan, owner, repo_name)
-
     if already_tracked:
         status_box = (
             "<div class='box' style='background:#e3f5e9;'>이미 연결된 저장소입니다. "
-            "새로 생긴 파일이 있으면 백그라운드에서 마저 스캔합니다.</div>"
+            "아래 연결 목록에서 <b>초기 스캔 시작</b> 버튼을 눌러 이어서 스캔할 수 있습니다.</div>"
         )
     elif webhook_ok:
         status_box = (
             "<div class='box' style='background:#e3f5e9;'>웹훅이 자동으로 등록됐습니다. "
-            "앞으로 이 저장소에 커밋이 생길 때마다 자동으로 분석됩니다.</div>"
+            "앞으로 이 저장소에 커밋이 생길 때마다 자동으로 분석됩니다. 기존 파일들을 검사하고 싶으면 "
+            "아래 연결 목록에서 <b>초기 스캔 시작</b> 버튼을 눌러주세요.</div>"
         )
     elif webhook_already_exists:
         status_box = (
             "<div class='box' style='background:#e3f5e9;'>이 저장소에는 이미 웹훅이 등록되어 있어, "
-            "연결 목록에 추가했습니다. 앞으로도 커밋할 때마다 자동으로 분석됩니다.</div>"
+            "연결 목록에 추가했습니다. 앞으로도 커밋할 때마다 자동으로 분석됩니다. 기존 파일들을 검사하고 "
+            "싶으면 아래 연결 목록에서 <b>초기 스캔 시작</b> 버튼을 눌러주세요.</div>"
         )
     else:
         status_box = (
@@ -827,10 +845,9 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
   {_nav_html('connect')}
   <h1>{owner}/{repo_name} 연결 처리 중</h1>
   {status_box}
-  <p class="sub" style="margin-top:16px;">이미 있던 파일들을 백그라운드에서 스캔하고 있습니다 (한 번에 최대 5개,
-    이미 스캔한 파일은 건너뜁니다. 5개 넘게 남아있으면 이 페이지에서 다시 연결하기를 눌러 이어서 스캔하세요).
-    <a href="/reports?view=all">전체 이력에서 진행 확인 →</a>
-    · <a href="/connect">연결 목록으로 →</a></p>
+  <p class="sub" style="margin-top:16px;">
+    <a href="/connect">연결 목록으로 이동 →</a> (거기서 "초기 스캔 시작" 버튼을 누르면 한 번에 최대 5개씩
+    스캔합니다. 이미 스캔한 파일은 자동으로 건너뜁니다.)</p>
 </body>
 </html>"""
     return HTMLResponse(content=html)
