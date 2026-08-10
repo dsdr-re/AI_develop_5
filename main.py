@@ -31,9 +31,9 @@ async def health():
 
 
 _RISK_STYLE = {
-    "low": ("var(--bg-success)", "var(--text-success)", "낮음"),
-    "medium": ("var(--bg-warning)", "var(--text-warning)", "중간"),
-    "high": ("var(--bg-danger)", "var(--text-danger)", "높음"),
+    "low": ("#e3f5e9", "#1a7f37", "낮음"),
+    "medium": ("#fdf1de", "#b25e09", "중간"),
+    "high": ("#fbe6e6", "#c92a2a", "높음"),
 }
 
 _CODE_EXTENSIONS = (".py", ".js", ".ts", ".java", ".go", ".rb", ".c", ".cpp", ".jsx", ".tsx")
@@ -180,7 +180,7 @@ async def dashboard_page():
   <div class="metric-grid">
     <div class="metric-card"><p class="metric-label">연결된 워크스페이스</p><p class="metric-value">{stats['workspace_count']}</p></div>
     <div class="metric-card"><p class="metric-label">전체 리포트</p><p class="metric-value">{stats['total_reports']}</p></div>
-    <div class="metric-card"><p class="metric-label">이번 주 위험 발견</p><p class="metric-value" style="color:#c98a1f;">{stats['risky_this_week']}</p></div>
+    <div class="metric-card"><p class="metric-label">이번 주 위험 발견</p><p class="metric-value" style="color:#c92a2a;">{stats['risky_this_week']}</p></div>
     <div class="metric-card"><p class="metric-label">낮음 (안전)</p><p class="metric-value" style="color:#1a9c5b;">{stats['low_count']}</p></div>
   </div>
   <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
