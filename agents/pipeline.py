@@ -107,8 +107,11 @@ def _enforce_search_failed_risk(risk_assessment: dict, patent_search_results: di
     if isinstance(patent_search_results, dict) and patent_search_results.get("search_failed"):
         if risk_assessment.get("risk_level") == "low":
             risk_assessment["risk_level"] = "medium"
-            risk_assessment["rationale"] = (
-                "KIPRIS 검색 중 일부 또는 전체가 실패해 완전한 검색 결과를 확인하지 못했습니다. "
+            risk_assessment["intro"] = (
+                "KIPRIS 검색 중 일부 또는 전체가 실패해 완전한 검색 결과를 확인하지 못했습니다."
+            )
+            risk_assessment["patent_reasons"] = []
+            risk_assessment["closing_note"] = (
                 "검색 결과가 없다는 뜻이 아니라 확인 자체를 못 한 상태이므로, 안전하다고 판단할 수 없습니다."
             )
             risk_assessment["recommended_action"] = (

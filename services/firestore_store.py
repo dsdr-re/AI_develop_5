@@ -92,6 +92,11 @@ def mark_resolved(report_id: str) -> None:
     _get_client().collection(_COLLECTION).document(report_id).update({"status": "resolved"})
 
 
+def mark_pending(report_id: str) -> None:
+    """해결됨 표시를 실수로 눌렀을 때 되돌리는 용도 — 다시 검토 대기 상태로 되돌린다."""
+    _get_client().collection(_COLLECTION).document(report_id).update({"status": "pending"})
+
+
 def get_dashboard_stats() -> dict:
     """대시보드 지표 카드용 집계. 소규모 프로젝트 스케일이라 전체를 읽어 파이썬에서 집계한다."""
     docs = _get_client().collection(_COLLECTION).stream()

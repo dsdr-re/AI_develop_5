@@ -7,14 +7,25 @@ import re
 from collections import OrderedDict
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from agents.pipeline import run_pipeline
-from services.firestore_store import get_dashboard_stats, get_report, list_reports, mark_resolved, save_report
+from services.firestore_store import (
+    get_dashboard_stats,
+    get_report,
+    list_reports,
+    mark_pending,
+    mark_resolved,
+    save_report,
+)
 from services.github_client import (
+    create_webhook,
     extract_push_event_info,
     get_commit_diff,
+    get_default_branch,
+    get_file_content,
+    list_repo_files,
     post_commit_comment,
     verify_webhook_signature,
 )
@@ -52,6 +63,12 @@ _ICON_DOC = (
     '<polyline points="14 2 14 8 20 8"></polyline></svg>'
 )
 
+_ICON_CHECK = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
+    'style="vertical-align:-3px; margin-right:4px;"><path d="M5 12l5 5L20 7"></path></svg>'
+)
+
 _PAGE_STYLE = """
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           max-width: 960px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }
@@ -71,12 +88,12 @@ _PAGE_STYLE = """
   .navbar { display: flex; align-items: center; justify-content: space-between;
             padding-bottom: 16px; border-bottom: 0.5px solid #e5e5e5; margin-bottom: 24px; }
   .navbar-left { display: flex; align-items: center; gap: 10px; }
-  .navbar-icon { width: 32px; height: 32px; border-radius: 8px; background: #e6f1fb;
-                 display: flex; align-items: center; justify-content: center; color: #185fa5; }
+  .navbar-icon { width: 32px; height: 32px; border-radius: 8px; background: #DBEAFE;
+                 display: flex; align-items: center; justify-content: center; color: #2563EB; }
   .navbar-title { font-size: 16px; font-weight: 500; }
   .navbar-links { display: flex; gap: 20px; }
-  .navbar-links a { font-size: 14px; color: #666; }
-  .navbar-links a.active { color: #1a1a1a; font-weight: 500; }
+  .navbar-links a { font-size: 14px; color: #666; padding-bottom: 2px; }
+  .navbar-links a.active { color: #2563EB; font-weight: 500; border-bottom: 2px solid #2563EB; }
   .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
                  gap: 12px; margin-bottom: 28px; }
   .metric-card { background: #f7f7f8; border-radius: 8px; padding: 1rem; }
@@ -95,13 +112,30 @@ _PAGE_STYLE = """
   .row-title { font-size: 14px; font-weight: 500; margin: 0; color: #1a1a1a; }
   .row-sub { font-size: 12px; color: #888; margin: 2px 0 0; }
   .row-time { font-size: 13px; color: #666; white-space: nowrap; }
-  .status-tag { font-size: 12px; color: #888; margin-right: 4px; white-space: nowrap; }
+  .status-tag { font-size: 12px; color: #1a7f37; background: #e3f5e9; padding: 2px 8px;
+                border-radius: 10px; margin-right: 8px; white-space: nowrap; }
+  .header-card { background: #EFF6FF; border: 0.5px solid #BFDBFE; border-radius: 12px;
+                 padding: 20px 24px; margin-bottom: 28px; }
+  .header-title { font-size: 20px; font-weight: 500; margin: 10px 0 6px; }
+  .btn-primary { padding: 8px 18px; background: #2563EB; color: white; border: none;
+                 border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+  .btn-status-pending { display: inline-flex; align-items: center; padding: 8px 14px;
+                        background: white; color: #2563EB; border: 1px solid #2563EB;
+                        border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer;
+                        white-space: nowrap; }
+  .btn-status-resolved { display: inline-flex; align-items: center; padding: 8px 14px;
+                         background: #e3f5e9; color: #1a7f37; border: none;
+                         border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer;
+                         white-space: nowrap; }
+  .ref-num { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center;
+             justify-content: center; font-size: 13px; font-weight: 500; flex-shrink: 0; }
 """
 
 
 def _nav_html(active: str) -> str:
     dash_cls = "active" if active == "dashboard" else ""
     list_cls = "active" if active == "list" else ""
+    connect_cls = "active" if active == "connect" else ""
     return f"""
 <div class="navbar">
   <div class="navbar-left">
@@ -116,6 +150,7 @@ def _nav_html(active: str) -> str:
   <div class="navbar-links">
     <a href="/" class="{dash_cls}">대시보드</a>
     <a href="/reports" class="{list_cls}">리포트 이력</a>
+    <a href="/connect" class="{connect_cls}">저장소 연결</a>
   </div>
 </div>
 """
@@ -123,6 +158,16 @@ def _nav_html(active: str) -> str:
 
 def _icon_for(filename: str) -> str:
     return _ICON_CODE if any(filename.endswith(ext) for ext in _CODE_EXTENSIONS) else _ICON_DOC
+
+
+_KST = datetime.timezone(datetime.timedelta(hours=9))
+
+
+def _to_kst(dt: datetime.datetime | None) -> datetime.datetime | None:
+    """Firestore는 UTC로 저장되므로, 화면에 보여줄 때는 한국 시간(KST, UTC+9)으로 변환한다."""
+    if not dt:
+        return None
+    return dt.astimezone(_KST)
 
 
 def _relative_time(dt: datetime.datetime | None) -> str:
@@ -139,22 +184,24 @@ def _relative_time(dt: datetime.datetime | None) -> str:
         return "어제"
     if days < 7:
         return f"{days}일 전"
-    return dt.strftime("%Y-%m-%d")
+    dt_kst = _to_kst(dt)
+    return dt_kst.strftime("%Y-%m-%d") if dt_kst else ""
 
 
 def _date_bucket(dt: datetime.datetime | None) -> str:
-    if not dt:
+    dt_kst = _to_kst(dt)
+    if not dt_kst:
         return "날짜 미상"
-    now = datetime.datetime.now(datetime.timezone.utc)
-    today = now.date()
-    d = dt.date()
+    now_kst = datetime.datetime.now(_KST)
+    today = now_kst.date()
+    d = dt_kst.date()
     if d == today:
         return "오늘"
     if d == today - datetime.timedelta(days=1):
         return "어제"
     if (today - d).days < 7:
         return "이번 주"
-    return dt.strftime("%Y-%m-%d")
+    return dt_kst.strftime("%Y-%m-%d")
 
 
 def _group_by_date(reports: list[dict]) -> "OrderedDict[str, list[dict]]":
@@ -186,7 +233,7 @@ def _render_grouped_list(reports: list[dict], *, show_status: bool) -> str:
             bg, text, label = _RISK_STYLE.get(risk, ("#eee", "#666", risk or "확인필요"))
             msg = r.get("commit_message") or "(커밋 메시지 없음)"
             file_label = _file_label(r)
-            created = r.get("created_at")
+            created = _to_kst(r.get("created_at"))
             time_str = created.strftime("%H:%M") if created else ""
             status = r.get("status") or "pending"
             status_html = '<span class="status-tag">해결됨</span>' if (show_status and status == "resolved") else ""
@@ -311,7 +358,7 @@ async def report_detail_page(report_id: str):
     github_url = f"https://github.com/{repo}/commit/{full_ref}" if repo and full_ref else "#"
     msg = r.get("commit_message") or "(커밋 메시지 없음)"
     file_label = _file_label(r)
-    created = r.get("created_at")
+    created = _to_kst(r.get("created_at"))
     created_str = created.strftime("%Y-%m-%d %H:%M") if created else ""
     status = r.get("status") or "pending"
 
@@ -319,16 +366,61 @@ async def report_detail_page(report_id: str):
     summary = extracted.get("summary") if isinstance(extracted, dict) else ""
 
     risk_assessment = r.get("risk_assessment")
-    rationale = risk_assessment.get("rationale") if isinstance(risk_assessment, dict) else ""
-    recommended_action = risk_assessment.get("recommended_action") if isinstance(risk_assessment, dict) else ""
-    related_patent_numbers = (
-        set(risk_assessment.get("related_patents") or []) if isinstance(risk_assessment, dict) else set()
-    )
+    ra = risk_assessment if isinstance(risk_assessment, dict) else {}
+    # 구 스키마(rationale/related_patents)로 저장된 예전 리포트도 안 죽게 폴백 처리
+    intro = ra.get("intro") or ra.get("rationale") or ""
+    patent_reasons = ra.get("patent_reasons") or []
+    closing_note = ra.get("closing_note") or ""
+    recommended_action = ra.get("recommended_action") or ""
 
     patent_results = r.get("patent_search_results")
     all_matches = (patent_results.get("matches") or []) if isinstance(patent_results, dict) else []
+    matches_by_appno = {m.get("application_number"): m for m in all_matches if m.get("application_number")}
 
-    def _render_patent_item(m: dict) -> str:
+    # patent_reasons 순서대로 번호(①②③)를 매기고, 실제 matches에 있는 것만 유효하게 취급
+    numbered = []
+    for pr in patent_reasons:
+        app_no = pr.get("application_number") if isinstance(pr, dict) else None
+        match = matches_by_appno.get(app_no)
+        if match:
+            numbered.append((len(numbered) + 1, match, pr.get("reason", "") if isinstance(pr, dict) else ""))
+
+    referenced_appnos = {m.get("application_number") for _, m, _ in numbered}
+    other_matches = [m for m in all_matches if m.get("application_number") not in referenced_appnos]
+
+    reason_blocks = []
+    for num, match, reason_text in numbered:
+        title = match.get("title") or "(제목 없음)"
+        reason_blocks.append(
+            f"<div style='display:flex; gap:12px; margin-bottom:16px;'>"
+            f"<span class='ref-num' style='background:{bg}; color:{text};'>{num}</span>"
+            f"<div style='flex:1;'>"
+            f"<a href='#patent-{num}' style='font-weight:500; color:#1a1a1a; font-size:14px;'>{title}</a>"
+            f"<p style='font-size:14px; color:#444; line-height:1.7; margin:4px 0 0;'>{reason_text}</p>"
+            f"</div></div>"
+        )
+
+    rationale_parts = []
+    if intro:
+        rationale_parts.append(f"<p style='font-size:14px; color:#444; line-height:1.7; margin:0 0 16px;'>{intro}</p>")
+    rationale_parts.extend(reason_blocks)
+    if closing_note:
+        rationale_parts.append(f"<p style='font-size:14px; color:#444; line-height:1.7; margin:0;'>{closing_note}</p>")
+    rationale_html = "".join(rationale_parts) if rationale_parts else "<p class='empty-inline'>근거 없음</p>"
+
+    def _render_numbered_patent(num: int, m: dict, is_last: bool) -> str:
+        title = m.get("title") or "(제목 없음)"
+        app_no = m.get("application_number") or "번호 미상"
+        p_status = m.get("registration_status") or "상태 미상"
+        border = "" if is_last else "border-bottom:0.5px solid #e5e5e5;"
+        return (
+            f"<div id='patent-{num}' style='display:flex; gap:12px; padding:14px 16px; {border}'>"
+            f"<span class='ref-num' style='background:{bg}; color:{text}; margin-top:1px;'>{num}</span>"
+            f"<div style='flex:1;'><p style='font-size:14px; font-weight:500; margin:0;'>{title}</p>"
+            f"<p style='font-size:12px; color:#888; margin:4px 0 0;'>출원번호 {app_no} · 등록상태 {p_status}</p></div></div>"
+        )
+
+    def _render_plain_patent(m: dict) -> str:
         title = m.get("title") or "(제목 없음)"
         app_no = m.get("application_number") or "번호 미상"
         p_status = m.get("registration_status") or "상태 미상"
@@ -339,18 +431,16 @@ async def report_detail_page(report_id: str):
             f"<div class='note'>{note}</div></li>"
         )
 
-    relevant_matches = [m for m in all_matches if m.get("application_number") in related_patent_numbers]
-    other_matches = [m for m in all_matches if m.get("application_number") not in related_patent_numbers]
-
-    if relevant_matches:
-        matches_html = "<ul class='patents'>" + "".join(_render_patent_item(m) for m in relevant_matches) + "</ul>"
+    if numbered:
+        items_html = "".join(_render_numbered_patent(n, m, n == len(numbered)) for n, m, _ in numbered)
+        matches_html = f"<div style='border:0.5px solid #e5e5e5; border-radius:12px; overflow:hidden;'>{items_html}</div>"
     elif all_matches:
         matches_html = "<p class='empty-inline'>검색은 됐지만, 실제로 관련성이 높다고 판단된 특허는 없습니다.</p>"
     else:
         matches_html = "<p class='empty-inline'>참고한 특허가 없습니다.</p>"
 
     if other_matches:
-        raw_items = "".join(_render_patent_item(m) for m in other_matches)
+        raw_items = "".join(_render_plain_patent(m) for m in other_matches)
         matches_html += (
             f"<details style='margin-top:12px;'>"
             f"<summary style='cursor:pointer; font-size:13px; color:#666;'>"
@@ -388,12 +478,14 @@ async def report_detail_page(report_id: str):
     if risk not in ("medium", "high"):
         status_html = ""
     elif status == "resolved":
-        status_html = "<span class='badge' style='background:#e3f5e9; color:#1a7f37;'>해결됨</span>"
+        status_html = (
+            f"<form method='post' action='/reports/{report_id}/reopen'>"
+            f"<button type='submit' class='btn-status-resolved'>{_ICON_CHECK}해결됨</button></form>"
+        )
     else:
         status_html = (
-            "<span class='badge' style='background:#f0f0f0; color:#666;'>검토 대기</span>"
-            f"<form method='post' action='/reports/{report_id}/resolve' style='display:inline; margin-left:8px;'>"
-            "<button type='submit'>검토 완료로 표시</button></form>"
+            f"<form method='post' action='/reports/{report_id}/resolve'>"
+            f"<button type='submit' class='btn-status-pending'>{_ICON_CHECK}검토 완료로 표시</button></form>"
         )
 
     html = f"""<!DOCTYPE html>
@@ -406,21 +498,24 @@ async def report_detail_page(report_id: str):
 <body>
   {_nav_html('list')}
   <span class="back" onclick="history.back()">&larr; 뒤로</span>
-  <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:4px;">
-    <div style="display:flex; align-items:center; gap:10px;">
-      <span class='badge' style='background:{bg}; color:{text};'>{label}</span>
-      <span style="font-size:16px; font-weight:500;">{msg}</span>
+
+  <div class="header-card">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px;">
+      <div>
+        <span class='badge' style='background:{bg}; color:{text};'>{label}</span>
+        <p class="header-title">{msg}</p>
+        <p class="sub" style="margin:0;">{repo} · {created_str} · {file_label}
+          · <a href="{github_url}" target="_blank" rel="noopener">GitHub에서 보기</a></p>
+      </div>
+      <div>{status_html}</div>
     </div>
-    <div>{status_html}</div>
   </div>
-  <p class="sub">{repo} · {created_str} · 변경 파일: {file_label}
-    · <a href="{github_url}" target="_blank" rel="noopener">GitHub에서 보기 →</a></p>
 
   <h2>요약</h2>
   <div class="box">{summary or '요약 없음'}</div>
 
   <h2>근거</h2>
-  <div class="box">{rationale or '근거 없음'}</div>
+  {rationale_html}
 
   <h2>권장 액션</h2>
   <div class="box">{recommended_action or '권장 액션 없음'}</div>
@@ -436,6 +531,12 @@ async def report_detail_page(report_id: str):
 @app.post("/reports/{report_id}/resolve")
 async def resolve_report(report_id: str):
     mark_resolved(report_id)
+    return RedirectResponse(url=f"/reports/{report_id}", status_code=303)
+
+
+@app.post("/reports/{report_id}/reopen")
+async def reopen_report(report_id: str):
+    mark_pending(report_id)
     return RedirectResponse(url=f"/reports/{report_id}", status_code=303)
 
 
@@ -471,6 +572,148 @@ def _extract_requirements_additions(diff_text: str, filename: str = "requirement
             continue
         packages.append((m.group(1), m.group(2)))
     return packages
+
+
+def _format_as_synthetic_diff(filename: str, content: str) -> str:
+    """파일 전체 내용을 "전부 새로 추가된 것"처럼 diff 형식으로 포장한다.
+
+    초기 연결 시 "이미 있던 파일"도 같은 파이프라인(특허 검색, 라이선스 검토)에
+    그대로 통과시키기 위한 용도 — 실제 diff든 파일 전체든 에이전트 입장에서는
+    똑같은 형식의 텍스트로 보인다.
+    """
+    plus_lines = "\n".join(f"+{line}" for line in content.splitlines())
+    return f"--- {filename} ---\n{plus_lines}"
+
+
+@app.get("/connect", response_class=HTMLResponse)
+async def connect_page():
+    html = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>저장소 연결</title>
+<style>{_PAGE_STYLE}</style>
+</head>
+<body>
+  {_nav_html('connect')}
+  <h1>GitHub 저장소 연결</h1>
+  <p class="sub">owner/repo 형식으로 입력하세요 (예: dsdr-re/AI_develop_5). 연결하면 웹훅을
+    자동으로 등록하고, 이미 저장소에 있던 기획 문서·코드도 한 번 훑어 리포트를 만듭니다.</p>
+  <form method="post" action="/connect" style="margin-top:20px; display:flex; gap:8px;">
+    <input type="text" name="repo" placeholder="owner/repo" required
+      style="padding:8px 12px; width:280px; border:0.5px solid #ccc; border-radius:8px; font-size:14px;">
+    <button type="submit" class="btn-primary">연결하기</button>
+  </form>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+async def _run_initial_scan(owner: str, repo: str) -> None:
+    """저장소를 처음 연결했을 때, 이미 있던 관련 파일(.md/.py/requirements.txt)을
+    전부 훑어서 리포트를 만든다. KIPRIS/Gemini 호출량 보호를 위해 파일 수를 제한한다.
+    """
+    MAX_FILES = 15
+    try:
+        branch = await get_default_branch(owner, repo)
+        files = await list_repo_files(owner, repo, branch=branch)
+    except Exception:
+        logger.exception("initial scan: failed to list files for %s/%s", owner, repo)
+        return
+
+    logger.info("initial scan: %s/%s에서 관련 파일 %d개 발견, 최대 %d개까지 스캔", owner, repo, len(files), MAX_FILES)
+
+    scanned = 0
+    for path in files:
+        if scanned >= MAX_FILES:
+            logger.info("initial scan: MAX_FILES(%d) 도달, 나머지 %d개는 건너뜀", MAX_FILES, len(files) - scanned)
+            break
+        try:
+            content = await get_file_content(owner, repo, path)
+        except Exception:
+            logger.exception("initial scan: failed to fetch %s", path)
+            continue
+        if not content.strip():
+            continue
+
+        diff_text = _format_as_synthetic_diff(path, content)
+        result = await run_pipeline(diff_text)
+
+        license_review: list[dict] = []
+        if path.rsplit("/", 1)[-1] == "requirements.txt":
+            for name, version in _extract_requirements_additions(diff_text, filename=path):
+                license_review.append(await get_pypi_license(name, version))
+
+        save_report(
+            source="github",
+            repo_or_doc_id=f"{owner}/{repo}",
+            trigger_ref=f"initial-scan:{path}",
+            report=result,
+            commit_message=f"초기 스캔: {path}",
+            changed_files=[path],
+            license_review=license_review,
+        )
+        scanned += 1
+        logger.info("initial scan: %s 처리 완료 (%d/%d)", path, scanned, min(len(files), MAX_FILES))
+
+    logger.info("initial scan 완료: %s/%s, 총 %d개 파일 처리", owner, repo, scanned)
+
+
+@app.post("/connect", response_class=HTMLResponse)
+async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo: str = Form(...)):
+    repo = repo.strip()
+    if "/" not in repo:
+        return HTMLResponse(
+            content="<p>owner/repo 형식으로 입력해주세요 (예: dsdr-re/AI_develop_5). "
+            "<a href='/connect'>다시 시도</a></p>",
+            status_code=400,
+        )
+    owner, _, repo_name = repo.partition("/")
+
+    webhook_url = str(request.base_url).rstrip("/") + "/webhook/github"
+    secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+
+    webhook_ok = False
+    webhook_error = ""
+    try:
+        await create_webhook(owner, repo_name, webhook_url, secret)
+        webhook_ok = True
+    except Exception as exc:
+        webhook_error = str(exc)
+        logger.warning("웹훅 자동 등록 실패: %s/%s: %s", owner, repo_name, exc)
+
+    background_tasks.add_task(_run_initial_scan, owner, repo_name)
+
+    if webhook_ok:
+        status_box = (
+            "<div class='box' style='background:#e3f5e9;'>웹훅이 자동으로 등록됐습니다. "
+            "앞으로 이 저장소에 커밋이 생길 때마다 자동으로 분석됩니다.</div>"
+        )
+    else:
+        status_box = (
+            "<div class='box' style='background:#fdf1de;'>웹훅 자동 등록에 실패했습니다 "
+            f"({webhook_error}). 아래 정보로 GitHub 저장소 Settings → Webhooks에서 직접 등록해주세요.<br><br>"
+            f"<b>Payload URL:</b> {webhook_url}<br>"
+            "<b>Content type:</b> application/json<br>"
+            "<b>Secret:</b> (Secret Manager의 github-webhook-secret 값)</div>"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>저장소 연결</title>
+<style>{_PAGE_STYLE}</style>
+</head>
+<body>
+  {_nav_html('connect')}
+  <h1>{owner}/{repo_name} 연결 처리 중</h1>
+  {status_box}
+  <p class="sub" style="margin-top:16px;">이미 있던 파일들을 백그라운드에서 스캔하고 있습니다 (최대 15개,
+    몇 분 정도 걸릴 수 있습니다). <a href="/reports?view=all">전체 이력에서 진행 확인 →</a></p>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 async def _process_push_event(info: dict, diff_text: str) -> None:
