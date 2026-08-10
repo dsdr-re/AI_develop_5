@@ -25,6 +25,8 @@ def save_report(
     repo_or_doc_id: str,
     trigger_ref: str,
     report: dict,
+    commit_message: str = "",
+    changed_files: list[str] | None = None,
 ) -> str:
     doc_id = str(uuid.uuid4())
     _get_client().collection(_COLLECTION).document(doc_id).set(
@@ -32,6 +34,8 @@ def save_report(
             "source": source,
             "repo_or_doc_id": repo_or_doc_id,
             "trigger_ref": trigger_ref,
+            "commit_message": commit_message,
+            "changed_files": changed_files or [],
             "risk_level": (report.get("risk_assessment") or {}).get("risk_level"),
             "extracted_context": report.get("extracted_context"),
             "patent_search_results": report.get("patent_search_results"),
@@ -65,3 +69,35 @@ def get_report(report_id: str) -> dict | None:
     if not doc.exists:
         return None
     return {"id": doc.id, **doc.to_dict()}
+
+
+def get_dashboard_stats() -> dict:
+    docs = _get_client().collection(_COLLECTION).stream()
+    all_reports = [d.to_dict() for d in docs]
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    week_ago = now - datetime.timedelta(days=7)
+
+    repos: set[str] = set()
+    total = 0
+    low_count = 0
+    risky_this_week = 0
+
+    for r in all_reports:
+        total += 1
+        if r.get("repo_or_doc_id"):
+            repos.add(r["repo_or_doc_id"])
+        risk = r.get("risk_level") or "low"
+        if risk == "low":
+            low_count += 1
+        created = r.get("created_at")
+        if created and risk in ("medium", "high"):
+            if created >= week_ago:
+                risky_this_week += 1
+
+    return {
+        "workspace_count": len(repos),
+        "total_reports": total,
+        "risky_this_week": risky_this_week,
+        "low_count": low_count,
+    }
