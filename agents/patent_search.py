@@ -1,7 +1,13 @@
-"""Patent Search Agent: 추출된 키워드로 KIPRIS Plus를 검색해 유사 특허 후보를 찾는다."""
+"""Patent Search Agent: 추출된 키워드로 KIPRIS Plus를 검색해 유사 특허 후보를 찾는다.
 
+입력: {extracted_context} (Context Extraction 에이전트의 출력)
+출력: output_key="patent_search_results"
+"""
+
+import asyncio
 import logging
 import os
+import time
 
 from google.adk.agents import LlmAgent
 
@@ -9,6 +15,23 @@ from services.kipris_client import KiprisClientError, search_patents
 
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 logger = logging.getLogger("ip-sentinel.patent_search")
+
+# KIPRIS가 짧은 시간에 몰린 요청을 거부/타임아웃시키는 현상이 관찰됨 — 파일 사이에만
+# 텀을 뒀던 것으로는 부족했다(한 파일 안에서 키워드 여러 개를 연달아 검색하는 경우가
+# 있었기 때문). 그래서 "검색 호출 하나하나" 사이에 최소 간격을 전역으로 강제한다.
+_MIN_INTERVAL_SECONDS = 2.0
+_rate_limit_lock = asyncio.Lock()
+_last_call_at = 0.0
+
+
+async def _throttle() -> None:
+    global _last_call_at
+    async with _rate_limit_lock:
+        now = time.monotonic()
+        wait = _MIN_INTERVAL_SECONDS - (now - _last_call_at)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call_at = time.monotonic()
 
 
 async def search_kipris(keyword: str) -> dict:
@@ -21,6 +44,7 @@ async def search_kipris(keyword: str) -> dict:
         검색된 특허 후보 목록과 총 건수를 담은 딕셔너리.
         실패 시 error 필드에 사유가 담긴다.
     """
+    await _throttle()
     try:
         results = await search_patents(keyword, num_rows=10)
     except KiprisClientError as exc:
