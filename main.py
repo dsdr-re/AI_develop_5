@@ -357,7 +357,9 @@ async def report_detail_page(report_id: str):
             f"<ul class='patents'>{raw_items}</ul></details>"
         )
 
-    if status == "resolved":
+    if risk not in ("medium", "high"):
+        status_html = ""
+    elif status == "resolved":
         status_html = "<span class='badge' style='background:#e3f5e9; color:#1a7f37;'>해결됨</span>"
     else:
         status_html = (
