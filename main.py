@@ -8,7 +8,12 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 
 from agents.pipeline import run_pipeline
 from services.firestore_store import save_report
-from services.github_client import extract_push_event_info, get_commit_diff, verify_webhook_signature
+from services.github_client import (
+    extract_push_event_info,
+    get_commit_diff,
+    post_commit_comment,
+    verify_webhook_signature,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +42,14 @@ async def _process_push_event(info: dict, diff_text: str) -> None:
     )
 
     logger.info("report saved: %s (risk=%s)", doc_id, (result.get("risk_assessment") or {}).get("risk_level"))
+
+    final_report = result.get("final_report")
+    if final_report:
+        try:
+            await post_commit_comment(info["owner"], info["repo"], info["commit_sha"], final_report)
+            logger.info("commit comment posted: %s/%s @ %s", info["owner"], info["repo"], info["commit_sha"])
+        except Exception:
+            logger.exception("failed to post commit comment")
 
 
 @app.post("/webhook/github")
@@ -67,7 +80,7 @@ async def github_webhook(
 
     background_tasks.add_task(_process_push_event, info, diff_text)
 
-    return {"status": "accepted", "message": "분석을 시작했습니다. 결과는 Firestore에서 확인하세요."}
+    return {"status": "accepted", "message": "분석을 시작했습니다. 잠시 후 커밋에 댓글로 리포트가 달립니다."}
 
 
 if __name__ == "__main__":
