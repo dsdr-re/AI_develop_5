@@ -39,6 +39,11 @@ class RiskAssessmentOutput(BaseModel):
     closing_note: str = Field(
         default="", description="마무리 코멘트 (예: 청구항 대조는 변리사 상담 필요, 검색 실패 안내 등)"
     )
+    opportunity_note: str = Field(
+        default="",
+        description="검색된 특허가 아예 없어서 위험도가 낮은 경우, 이를 차별화 기회로 해석하는 한두 문장. "
+        "그 외의 경우(특허는 검색됐지만 무관해서 낮음, 검색 실패 등)에는 빈 문자열",
+    )
     recommended_action: str = Field(description="사용자가 다음에 취해야 할 구체적 행동")
 
 
@@ -67,7 +72,12 @@ risk_assessment_agent = LlmAgent(
   적으세요. 검색 실패를 "안전함"으로 착각하는 것이 가장 위험한 오류입니다.
 - search_failed가 false이면서 searched가 false이거나 matches가 비어있으면
   risk_level="low", intro에 "관련 특허가 검색되지 않음"이라고 명시하고 patent_reasons는
-  빈 배열로 두세요.
+  빈 배열로 두세요. 이 경우 opportunity_note에 "이 아이디어와 겹치는 특허가 검색되지
+  않았습니다. 기존 특허들이 다루지 않은 영역일 수 있어, 오히려 차별화 포인트로
+  활용할 만한 여지가 있습니다"와 같이 긍정적으로 해석하는 한두 문장을 추가하세요.
+  (주의: 이건 "검색된 특허가 아예 없을 때"만 해당합니다. 특허가 검색됐지만 무관해서
+  patent_reasons가 빈 경우나 search_failed인 경우에는 "차별화됐다"고 확신할 근거가
+  없으므로 opportunity_note를 빈 문자열로 두세요.)
 - **중요**: patent_search_results.matches는 관련성 필터링을 거치지 않은 원본 검색
   결과입니다. matches에 항목이 있다고 곧바로 위험하다고 판단하지 마세요. 각 항목의
   title·abstract_snippet을 extracted_context의 핵심 아이디어와 직접 비교해서, 실제로

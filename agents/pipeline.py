@@ -117,6 +117,9 @@ def _enforce_search_failed_risk(risk_assessment: dict, patent_search_results: di
             risk_assessment["recommended_action"] = (
                 "KIPRIS 검색을 다시 시도하거나(웹훅 Redeliver), 직접 KIPRIS Plus에서 검색해 확인해 주세요."
             )
+            # 검색 실패는 "특허가 없다"는 확인이 아니라 "확인을 못 했다"는 것이므로,
+            # 차별화 포인트로 해석하는 문구가 남아있으면 안 된다.
+            risk_assessment["opportunity_note"] = ""
     return risk_assessment
 
 

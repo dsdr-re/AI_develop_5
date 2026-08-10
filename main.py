@@ -379,6 +379,7 @@ async def report_detail_page(report_id: str):
     intro = ra.get("intro") or ra.get("rationale") or ""
     patent_reasons = ra.get("patent_reasons") or []
     closing_note = ra.get("closing_note") or ""
+    opportunity_note = ra.get("opportunity_note") or ""
     recommended_action = ra.get("recommended_action") or ""
 
     patent_results = r.get("patent_search_results")
@@ -412,6 +413,12 @@ async def report_detail_page(report_id: str):
     if intro:
         rationale_parts.append(f"<p style='font-size:14px; color:#444; line-height:1.7; margin:0 0 16px;'>{intro}</p>")
     rationale_parts.extend(reason_blocks)
+    if opportunity_note:
+        rationale_parts.append(
+            "<div style='background:#e3f5e9; border-radius:8px; padding:12px 14px; "
+            "margin:4px 0 16px; font-size:14px; color:#1a7f37; line-height:1.7;'>"
+            f"<strong>차별화 포인트:</strong> {opportunity_note}</div>"
+        )
     if closing_note:
         rationale_parts.append(f"<p style='font-size:14px; color:#444; line-height:1.7; margin:0;'>{closing_note}</p>")
     rationale_html = "".join(rationale_parts) if rationale_parts else "<p class='empty-inline'>근거 없음</p>"
@@ -467,12 +474,23 @@ async def report_detail_page(report_id: str):
             lic_version = lic.get("version") or ""
             lic_license = lic.get("license") or "확인 불가"
             lic_note = lic.get("note") or ""
+            lic_detail = lic.get("detailed_obligations") or ""
+            detail_html = ""
+            if lic_detail:
+                detail_html = (
+                    "<details style='margin-top:6px;'>"
+                    "<summary style='cursor:pointer; font-size:12px; color:#2563EB;'>"
+                    "한국저작권위원회 자료로 상세 의무사항 보기</summary>"
+                    f"<p style='font-size:13px; color:#555; margin:6px 0 0; line-height:1.6;'>{lic_detail}</p>"
+                    "</details>"
+                )
             lic_items.append(
                 "<li style='display:flex; align-items:flex-start; justify-content:space-between; "
                 "gap:12px; padding:14px 0; border-bottom:0.5px solid #e5e5e5;'>"
                 f"<div style='flex:1;'><p style='font-size:14px; font-weight:500; margin:0;'>{lic_name} "
                 f"<span style='color:#888; font-weight:400;'>{lic_version} · {lic_license}</span></p>"
-                f"<p style='font-size:13px; color:#666; margin:4px 0 0;'>{lic_note}</p></div>"
+                f"<p style='font-size:13px; color:#666; margin:4px 0 0;'>{lic_note}</p>"
+                f"{detail_html}</div>"
                 f"<span class='badge' style='background:{lic_bg}; color:{lic_text};'>{lic_risk}</span></li>"
             )
         license_html = (
