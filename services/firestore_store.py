@@ -1,7 +1,4 @@
-"""리포트 이력을 Firestore에 저장/조회한다.
-
-UR-05 대응: 투자 실사 요청이 왔을 때 벼락치기 대신 축적된 이력을 그대로 꺼내 쓸 수 있게 함.
-"""
+"""리포트 이력을 Firestore에 저장/조회한다."""
 
 from __future__ import annotations
 
@@ -29,14 +26,6 @@ def save_report(
     trigger_ref: str,
     report: dict,
 ) -> str:
-    """리포트 하나를 저장하고 문서 ID를 반환한다.
-
-    Args:
-        source: "github" | "drive"
-        repo_or_doc_id: 저장소 full_name 또는 Drive 문서 ID
-        trigger_ref: 커밋 SHA, PR 번호, 문서 revision 등 트리거 식별자
-        report: pipeline.run_pipeline()의 반환값
-    """
     doc_id = str(uuid.uuid4())
     _get_client().collection(_COLLECTION).document(doc_id).set(
         {
@@ -60,14 +49,19 @@ def list_reports(
     min_risk_level: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """실사 대응용: 저장된 리포트 이력을 필터링해 조회한다 (UR-05)."""
     query = _get_client().collection(_COLLECTION)
     if repo_or_doc_id:
         query = query.where("repo_or_doc_id", "==", repo_or_doc_id)
     if min_risk_level:
-        # low < medium < high 순서 필터링이 필요하면 애플리케이션 레벨에서 추가 필터링 권장
         query = query.where("risk_level", "==", min_risk_level)
     query = query.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
 
     docs = query.stream()
     return [{"id": d.id, **d.to_dict()} for d in docs]
+
+
+def get_report(report_id: str) -> dict | None:
+    doc = _get_client().collection(_COLLECTION).document(report_id).get()
+    if not doc.exists:
+        return None
+    return {"id": doc.id, **doc.to_dict()}
