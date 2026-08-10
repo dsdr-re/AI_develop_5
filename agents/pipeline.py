@@ -41,6 +41,47 @@ def _maybe_parse_json(value):
         return value
 
 
+def _reconcile_patent_matches(patent_search_results: dict, raw_kipris_calls: list[dict]) -> dict:
+    """LLM 요약을 신뢰하지 않고, 도구가 실제로 반환한 값을 authoritative source로 삼는다."""
+    if not isinstance(patent_search_results, dict):
+        patent_search_results = {}
+
+    llm_notes = {}
+    for m in patent_search_results.get("matches") or []:
+        if isinstance(m, dict) and m.get("application_number"):
+            llm_notes[m["application_number"]] = m.get("relevance_note", "")
+
+    seen = set()
+    reconciled = []
+    any_error = False
+    for call in raw_kipris_calls:
+        if not isinstance(call, dict):
+            continue
+        if call.get("error"):
+            any_error = True
+            continue
+        for r in call.get("results") or []:
+            app_no = r.get("application_number")
+            if not app_no or app_no in seen:
+                continue
+            seen.add(app_no)
+            reconciled.append(
+                {
+                    "application_number": app_no,
+                    "title": r.get("title"),
+                    "applicant": r.get("applicant"),
+                    "abstract_snippet": (r.get("abstract") or "")[:300],
+                    "registration_status": r.get("registration_status"),
+                    "relevance_note": llm_notes.get(app_no, ""),
+                }
+            )
+
+    patent_search_results["matches"] = reconciled
+    patent_search_results["searched"] = bool(raw_kipris_calls) or patent_search_results.get("searched", False)
+    patent_search_results["search_failed"] = any_error or bool(patent_search_results.get("search_failed"))
+    return patent_search_results
+
+
 async def run_pipeline(raw_diff_or_doc: str, *, user_id: str = "system") -> dict:
     session_id = str(uuid.uuid4())
     session = await _runner.session_service.create_session(
@@ -54,18 +95,26 @@ async def run_pipeline(raw_diff_or_doc: str, *, user_id: str = "system") -> dict
         role="user", parts=[types.Part.from_text(text="워크스페이스 변경사항을 분석해 주세요.")]
     )
 
-    async for _event in _runner.run_async(
+    raw_kipris_calls: list[dict] = []
+
+    async for event in _runner.run_async(
         user_id=user_id, session_id=session.id, new_message=trigger_message
     ):
-        pass
+        for fr in event.get_function_responses():
+            if fr.name == "search_kipris" and fr.response:
+                raw_kipris_calls.append(fr.response)
 
     final_session = await _runner.session_service.get_session(
         app_name=APP_NAME, user_id=user_id, session_id=session.id
     )
     state = final_session.state
+
+    patent_search_results = _maybe_parse_json(state.get("patent_search_results"))
+    patent_search_results = _reconcile_patent_matches(patent_search_results, raw_kipris_calls)
+
     return {
         "extracted_context": _maybe_parse_json(state.get("extracted_context")),
-        "patent_search_results": _maybe_parse_json(state.get("patent_search_results")),
+        "patent_search_results": patent_search_results,
         "risk_assessment": _maybe_parse_json(state.get("risk_assessment")),
         "final_report": state.get("final_report"),
     }
