@@ -18,6 +18,7 @@ from services.github_client import (
     post_commit_comment,
     verify_webhook_signature,
 )
+from services.license_client import get_pypi_license
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -357,6 +358,33 @@ async def report_detail_page(report_id: str):
             f"<ul class='patents'>{raw_items}</ul></details>"
         )
 
+    license_review = r.get("license_review") or []
+    license_html = ""
+    if license_review:
+        lic_items = []
+        for lic in license_review:
+            lic_risk = lic.get("risk") or "주의"
+            lic_bg, lic_text = ("#e3f5e9", "#1a7f37") if lic_risk == "안전" else ("#fdf1de", "#b25e09")
+            lic_name = lic.get("name") or "(이름 없음)"
+            lic_version = lic.get("version") or ""
+            lic_license = lic.get("license") or "확인 불가"
+            lic_note = lic.get("note") or ""
+            lic_items.append(
+                "<li style='display:flex; align-items:flex-start; justify-content:space-between; "
+                "gap:12px; padding:14px 0; border-bottom:0.5px solid #e5e5e5;'>"
+                f"<div style='flex:1;'><p style='font-size:14px; font-weight:500; margin:0;'>{lic_name} "
+                f"<span style='color:#888; font-weight:400;'>{lic_version} · {lic_license}</span></p>"
+                f"<p style='font-size:13px; color:#666; margin:4px 0 0;'>{lic_note}</p></div>"
+                f"<span class='badge' style='background:{lic_bg}; color:{lic_text};'>{lic_risk}</span></li>"
+            )
+        license_html = (
+            "<div style='border-top:2px solid #e5e5e5; margin:36px 0 0;'></div>"
+            "<h2>라이선스 검토</h2>"
+            "<p style='font-size:13px; color:#888; margin:0 0 12px;'>"
+            "이번 변경사항에서 새로 추가된 라이브러리를 확인했습니다. 특허 위험도와는 별개의 판단입니다.</p>"
+            f"<ul style='list-style:none; padding:0; margin:0;'>{''.join(lic_items)}</ul>"
+        )
+
     if risk not in ("medium", "high"):
         status_html = ""
     elif status == "resolved":
@@ -399,6 +427,7 @@ async def report_detail_page(report_id: str):
 
   <h2>참고한 특허</h2>
   {matches_html}
+  {license_html}
 </body>
 </html>"""
     return HTMLResponse(content=html)
@@ -411,7 +440,37 @@ async def resolve_report(report_id: str):
 
 
 def _extract_changed_files(diff_text: str) -> list[str]:
+    """get_commit_diff가 만든 '--- {filename} ---' 마커에서 파일명만 뽑아낸다."""
     return re.findall(r"^--- (.+?) ---$", diff_text, re.MULTILINE)
+
+
+_REQ_LINE_RE = re.compile(r"^([A-Za-z0-9_.\-]+)(?:\[[\w,\s]+\])?\s*(?:==\s*([\w.\-]+))?")
+
+
+def _extract_requirements_additions(diff_text: str, filename: str = "requirements.txt") -> list[tuple[str, str | None]]:
+    """diff_text에서 requirements.txt 블록만 골라, 새로 추가된(+) 줄에서 패키지명/버전을 뽑는다.
+
+    == 로 버전이 고정된 경우만 버전을 함께 반환하고, 아니면 None (deps.dev가 기본 버전을 찾는다).
+    """
+    marker = f"--- {filename} ---"
+    if marker not in diff_text:
+        return []
+    start = diff_text.index(marker) + len(marker)
+    next_marker_idx = diff_text.find("\n--- ", start)
+    block = diff_text[start:next_marker_idx] if next_marker_idx != -1 else diff_text[start:]
+
+    packages: list[tuple[str, str | None]] = []
+    for line in block.splitlines():
+        if not line.startswith("+") or line.startswith("++"):
+            continue
+        content = line[1:].strip()
+        if not content or content.startswith("#") or content.startswith("-"):
+            continue
+        m = _REQ_LINE_RE.match(content)
+        if not m:
+            continue
+        packages.append((m.group(1), m.group(2)))
+    return packages
 
 
 async def _process_push_event(info: dict, diff_text: str) -> None:
@@ -422,6 +481,14 @@ async def _process_push_event(info: dict, diff_text: str) -> None:
     result = await run_pipeline(diff_text)
     changed_files = _extract_changed_files(diff_text)
 
+    license_review: list[dict] = []
+    if "requirements.txt" in changed_files:
+        new_packages = _extract_requirements_additions(diff_text)
+        for name, version in new_packages:
+            info_dict = await get_pypi_license(name, version)
+            license_review.append(info_dict)
+        logger.info("license review: %d개 라이브러리 확인 (%s)", len(license_review), changed_files)
+
     doc_id = save_report(
         source="github",
         repo_or_doc_id=f"{info['owner']}/{info['repo']}",
@@ -429,6 +496,7 @@ async def _process_push_event(info: dict, diff_text: str) -> None:
         report=result,
         commit_message=info.get("commit_message") or "",
         changed_files=changed_files,
+        license_review=license_review,
     )
 
     logger.info("report saved: %s (risk=%s)", doc_id, (result.get("risk_assessment") or {}).get("risk_level"))
