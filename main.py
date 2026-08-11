@@ -140,6 +140,10 @@ _PAGE_STYLE = """
                          white-space: nowrap; }
   .ref-num { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center;
              justify-content: center; font-size: 13px; font-weight: 500; flex-shrink: 0; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #cbd5e1;
+             border-top-color: #2563EB; border-radius: 50%; animation: spin 0.7s linear infinite;
+             margin-right: 8px; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 """
 
 
@@ -627,21 +631,31 @@ def _format_as_synthetic_diff(filename: str, content: str) -> str:
 @app.get("/connect", response_class=HTMLResponse)
 async def connect_page():
     connected = list_connected_repos()
+    any_scanning = any(r.get("scanning") for r in connected)
     rows = []
     for r in connected:
         connected_at = _to_kst(r.get("connected_at"))
         time_str = connected_at.strftime("%Y-%m-%d %H:%M") if connected_at else ""
+        if r.get("scanning"):
+            scan_action_html = (
+                "<span style='display:inline-flex; align-items:center; padding:6px 12px; "
+                "font-size:13px; color:#666;'><span class='spinner'></span>스캔 중...</span>"
+            )
+        else:
+            scan_action_html = (
+                "<form method='post' action='/connect/scan'>"
+                f"<input type='hidden' name='repo' value='{r.get('repo')}'>"
+                "<button type='submit' class='btn-status-pending' style='padding:6px 12px; font-size:13px;'>"
+                "초기 스캔 시작</button>"
+                "</form>"
+            )
         rows.append(
             "<div style='display:flex; align-items:center; justify-content:space-between; "
             "padding:12px 16px; border-bottom:0.5px solid #e5e5e5;'>"
             f"<div><p style='font-size:14px; font-weight:500; margin:0;'>{r.get('repo')}</p>"
             f"<p style='font-size:12px; color:#888; margin:2px 0 0;'>{time_str} 연결됨</p></div>"
             "<div style='display:flex; gap:8px;'>"
-            "<form method='post' action='/connect/scan'>"
-            f"<input type='hidden' name='repo' value='{r.get('repo')}'>"
-            "<button type='submit' class='btn-status-pending' style='padding:6px 12px; font-size:13px;'>"
-            "초기 스캔 시작</button>"
-            "</form>"
+            f"{scan_action_html}"
             "<form method='post' action='/connect/disconnect'>"
             f"<input type='hidden' name='repo' value='{r.get('repo')}'>"
             "<button type='submit' style='font-size:13px; color:#c92a2a; background:white; "
@@ -653,11 +667,15 @@ async def connect_page():
         if rows
         else "<p class='empty-inline' style='margin-bottom:32px;'>연결된 저장소가 없습니다.</p>"
     )
+    # 스캔 중인 저장소가 있으면 4초마다 자동 새로고침해서 "스캔 중..." → 완료 전환을
+    # 사용자가 직접 새로고침 안 해도 보게 한다. 스캔 중인 게 없으면 넣지 않는다(불필요한 리로드 방지).
+    auto_refresh_html = '<meta http-equiv="refresh" content="4">' if any_scanning else ""
 
     html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
+{auto_refresh_html}
 <title>저장소 연결</title>
 <style>{_PAGE_STYLE}</style>
 </head>
@@ -721,67 +739,75 @@ async def _run_initial_scan(owner: str, repo: str) -> None:
     전부 훑어서 리포트를 만든다. KIPRIS/Gemini 호출량 보호를 위해 파일 수를 제한하고,
     파일 사이에 짧은 텀을 둬서 KIPRIS 서버에 연달아 몰아치지 않게 한다.
     같은 저장소를 다시 연결해도 이미 스캔한 파일은 건너뛴다(중복 방지).
+
+    scanning 플래그는 /connect 화면이 "스캔 중..." 상태를 보여주는 데 쓴다 —
+    background_tasks라 리다이렉트 시점엔 이미 끝났다고 착각하기 쉬워서, 시작할 때
+    True로 켜두고 끝나면(성공/실패 무관) finally에서 반드시 False로 되돌린다.
     """
     MAX_FILES = 5  # 한 번에 너무 많이 하면 KIPRIS 부하 + Cloud Run 5분 타임아웃 위험. 이어서 스캔 가능.
     DELAY_BETWEEN_FILES = 2.0
     repo_id = f"{owner}/{repo}"
-    token = await _resolve_repo_token(repo_id)
+    update_connected_repo(repo_id, scanning=True)
     try:
-        branch = await get_default_branch(owner, repo, token=token)
-        files = await list_repo_files(owner, repo, branch=branch, token=token)
-    except Exception:
-        logger.exception("initial scan: failed to list files for %s/%s", owner, repo)
-        return
-
-    # 이 저장소에 대해 이미 초기 스캔으로 만들어진 리포트가 있으면 그 파일들은 건너뛴다.
-    already_scanned = {
-        r.get("trigger_ref")
-        for r in list_reports(limit=200)
-        if r.get("repo_or_doc_id") == repo_id and (r.get("trigger_ref") or "").startswith("initial-scan:")
-    }
-    files = [p for p in files if f"initial-scan:{p}" not in already_scanned]
-
-    logger.info(
-        "initial scan: %s에서 관련 파일 %d개 발견(이미 스캔한 것 제외), 최대 %d개까지 스캔",
-        repo_id, len(files), MAX_FILES,
-    )
-
-    scanned = 0
-    for path in files:
-        if scanned >= MAX_FILES:
-            logger.info("initial scan: MAX_FILES(%d) 도달, 나머지 %d개는 건너뜀", MAX_FILES, len(files) - scanned)
-            break
-        if scanned > 0:
-            await asyncio.sleep(DELAY_BETWEEN_FILES)
+        token = await _resolve_repo_token(repo_id)
         try:
-            content = await get_file_content(owner, repo, path, token=token)
+            branch = await get_default_branch(owner, repo, token=token)
+            files = await list_repo_files(owner, repo, branch=branch, token=token)
         except Exception:
-            logger.exception("initial scan: failed to fetch %s", path)
-            continue
-        if not content.strip():
-            continue
+            logger.exception("initial scan: failed to list files for %s/%s", owner, repo)
+            return
 
-        diff_text = _format_as_synthetic_diff(path, content)
-        result = await run_pipeline(diff_text)
+        # 이 저장소에 대해 이미 초기 스캔으로 만들어진 리포트가 있으면 그 파일들은 건너뛴다.
+        already_scanned = {
+            r.get("trigger_ref")
+            for r in list_reports(limit=200)
+            if r.get("repo_or_doc_id") == repo_id and (r.get("trigger_ref") or "").startswith("initial-scan:")
+        }
+        files = [p for p in files if f"initial-scan:{p}" not in already_scanned]
 
-        license_review: list[dict] = []
-        if path.rsplit("/", 1)[-1] == "requirements.txt":
-            for name, version in _extract_requirements_additions(diff_text, filename=path):
-                license_review.append(await get_pypi_license(name, version))
-
-        save_report(
-            source="github",
-            repo_or_doc_id=f"{owner}/{repo}",
-            trigger_ref=f"initial-scan:{path}",
-            report=result,
-            commit_message=f"초기 스캔: {path}",
-            changed_files=[path],
-            license_review=license_review,
+        logger.info(
+            "initial scan: %s에서 관련 파일 %d개 발견(이미 스캔한 것 제외), 최대 %d개까지 스캔",
+            repo_id, len(files), MAX_FILES,
         )
-        scanned += 1
-        logger.info("initial scan: %s 처리 완료 (%d/%d)", path, scanned, min(len(files), MAX_FILES))
 
-    logger.info("initial scan 완료: %s/%s, 총 %d개 파일 처리", owner, repo, scanned)
+        scanned = 0
+        for path in files:
+            if scanned >= MAX_FILES:
+                logger.info("initial scan: MAX_FILES(%d) 도달, 나머지 %d개는 건너뜀", MAX_FILES, len(files) - scanned)
+                break
+            if scanned > 0:
+                await asyncio.sleep(DELAY_BETWEEN_FILES)
+            try:
+                content = await get_file_content(owner, repo, path, token=token)
+            except Exception:
+                logger.exception("initial scan: failed to fetch %s", path)
+                continue
+            if not content.strip():
+                continue
+
+            diff_text = _format_as_synthetic_diff(path, content)
+            result = await run_pipeline(diff_text)
+
+            license_review: list[dict] = []
+            if path.rsplit("/", 1)[-1] == "requirements.txt":
+                for name, version in _extract_requirements_additions(diff_text, filename=path):
+                    license_review.append(await get_pypi_license(name, version))
+
+            save_report(
+                source="github",
+                repo_or_doc_id=f"{owner}/{repo}",
+                trigger_ref=f"initial-scan:{path}",
+                report=result,
+                commit_message=f"초기 스캔: {path}",
+                changed_files=[path],
+                license_review=license_review,
+            )
+            scanned += 1
+            logger.info("initial scan: %s 처리 완료 (%d/%d)", path, scanned, min(len(files), MAX_FILES))
+
+        logger.info("initial scan 완료: %s/%s, 총 %d개 파일 처리", owner, repo, scanned)
+    finally:
+        update_connected_repo(repo_id, scanning=False)
 
 
 @app.post("/connect", response_class=HTMLResponse)
