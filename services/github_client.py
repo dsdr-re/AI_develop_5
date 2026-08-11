@@ -220,7 +220,12 @@ _RELEVANT_EXTENSIONS = (".md", ".py")
 
 
 def _is_relevant_file(path: str) -> bool:
-    """초기 스캔 대상 파일인지 판단한다 (기획 문서 .md, 코드 .py, requirements.txt)."""
+    """초기 스캔 대상 파일인지 판단한다 (기획 문서 .md, 코드 .py, requirements.txt).
+    knowledge/ 폴더는 RAG용 지식 문서(라이선스 가이드 등)라 실제 기획/코드가
+    아니므로 제외한다.
+    """
+    if path.startswith("knowledge/"):
+        return False
     filename = path.rsplit("/", 1)[-1]
     return path.endswith(_RELEVANT_EXTENSIONS) or filename == "requirements.txt"
 
