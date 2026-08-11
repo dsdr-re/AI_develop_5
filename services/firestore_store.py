@@ -14,7 +14,9 @@ import uuid
 from google.cloud import firestore
 
 _COLLECTION = os.environ.get("FIRESTORE_COLLECTION", "ip_sentinel_reports")
-_CONNECTED_REPOS_COLLECTION = "ip_sentinel_connected_repos"
+_CONNECTED_REPOS_COLLECTION = os.environ.get(
+    "FIRESTORE_CONNECTED_REPOS_COLLECTION", "ip_sentinel_connected_repos"
+)
 _client: firestore.Client | None = None
 
 
