@@ -1,4 +1,4 @@
-"""IP Sentinel 파이프라인: Context Extraction → Patent Search → Risk Assessment → Reporter.
+"""IP DETECDOG 파이프라인: Context Extraction → Patent Search → Risk Assessment → Reporter.
 
 Orchestrator 역할은 이 파이프라인을 언제/무엇으로 트리거할지 결정하는 main.py의
 웹훅 핸들러가 담당한다 (ADK의 SequentialAgent가 순서 보장 자체는 대신 해주므로,

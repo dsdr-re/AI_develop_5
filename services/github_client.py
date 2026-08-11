@@ -53,27 +53,6 @@ async def get_commit_diff(
     return "\n\n".join(patches)
 
 
-async def get_pull_request_diff(
-    owner: str,
-    repo: str,
-    pr_number: int,
-    *,
-    token: str | None = None,
-    timeout: float = 15.0,
-) -> str:
-    """PR 전체 diff를 텍스트로 가져온다."""
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
-    headers = {"Accept": "application/vnd.github.v3.diff"}
-    auth_token = token or os.environ.get("GITHUB_ACCESS_TOKEN")
-    if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        return resp.text
-
-
 async def post_commit_comment(
     owner: str,
     repo: str,
@@ -83,7 +62,7 @@ async def post_commit_comment(
     token: str | None = None,
     timeout: float = 15.0,
 ) -> dict:
-    """커밋에 IP Sentinel 리포트를 댓글로 남긴다.
+    """커밋에 IP DETECDOG 리포트를 댓글로 남긴다.
 
     Firestore/로그를 뒤지지 않아도, 커밋을 만든 바로 그 자리에서 리포트를
     확인할 수 있게 하는 게 목적 (UR-01: 별도 시간 없이 자동으로 확인).
