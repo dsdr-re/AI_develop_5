@@ -689,13 +689,13 @@ async def connect_page():
   <h2>새 저장소 연결</h2>
   <p class="sub" style="max-width:420px;">owner/repo 형식으로 입력하세요. 연결하면 웹훅을
     자동으로 등록하고, 이미 저장소에 있던 기획 문서·코드도 한 번 훑어 리포트를 만듭니다.</p>
-  <form method="post" action="/connect" style="margin-top:12px; display:flex; flex-direction:column; gap:8px; max-width:420px;">
+  <form method="post" action="/connect" style="margin-top:12px; display:flex; flex-direction:column; gap:8px; max-width:600px;">
     <input type="text" name="repo" placeholder="owner/repo" required
-      style="padding:8px 12px; border:0.5px solid #ccc; border-radius:8px; font-size:14px;">
+      style="padding:8px 12px; border:0.5px solid #ccc; border-radius:8px; font-size:14px; max-width:420px;">
     <input type="password" name="token" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx (GitHub personal access token)" required
-      style="padding:8px 12px; border:0.5px solid #ccc; border-radius:8px; font-size:14px;">
+      style="padding:8px 12px; border:0.5px solid #ccc; border-radius:8px; font-size:14px; max-width:420px;">
     <p class="sub" style="margin:0; font-size:12px;">연결하려는 저장소에 admin 권한이 있는 계정에서 발급한 토큰이 필요합니다
-      (repo, admin:repo_hook 권한). <a href="https://github.com/settings/tokens/new" target="_blank">토큰 발급하기 →</a><br>
+      (repo, admin:repo_hook 권한). <a href="https://github.com/settings/tokens/new" target="_blank">토큰 발급하기 →</a>
       토큰은 이 저장소 연결에만 쓰이고 Secret Manager에 암호화되어 저장되며, 연결 해제 시에도 별도로 남지 않습니다.</p>
     <button type="submit" class="btn-primary" style="align-self:flex-start;">연결하기</button>
   </form>
