@@ -14,7 +14,9 @@ import uuid
 from google.cloud import firestore
 
 _COLLECTION = os.environ.get("FIRESTORE_COLLECTION", "ip_sentinel_reports")
-_CONNECTED_REPOS_COLLECTION = "ip_sentinel_connected_repos"
+_CONNECTED_REPOS_COLLECTION = os.environ.get(
+    "FIRESTORE_CONNECTED_REPOS_COLLECTION", "ip_sentinel_connected_repos"
+)
 _client: firestore.Client | None = None
 
 
@@ -127,18 +129,34 @@ def get_dashboard_stats() -> dict:
     }
 
 
-def add_connected_repo(repo: str, *, webhook_id: int | None = None) -> str:
+def add_connected_repo(
+    repo: str, *, webhook_id: int | None = None, secret_name: str | None = None
+) -> str:
     """저장소를 '연결됨' 상태로 진짜로 기록한다. 리포트 존재 여부로 추측하는 방식은
-    Firestore를 지워도 GitHub 웹훅은 그대로 남아있어 부정확했다 — 이 컬렉션이 진실의 원천."""
+    Firestore를 지워도 GitHub 웹훅은 그대로 남아있어 부정확했다 — 이 컬렉션이 진실의 원천.
+
+    secret_name: 이 저장소의 GitHub PAT이 저장된 Secret Manager 리소스 경로.
+    (레거시 연결처럼 없으면 호출부가 GITHUB_ACCESS_TOKEN 환경변수로 폴백한다.)
+    """
     doc_id = str(uuid.uuid4())
-    _get_client().collection(_CONNECTED_REPOS_COLLECTION).document(doc_id).set(
-        {
-            "repo": repo,
-            "webhook_id": webhook_id,
-            "connected_at": datetime.datetime.now(datetime.timezone.utc),
-        }
-    )
+    doc: dict = {
+        "repo": repo,
+        "webhook_id": webhook_id,
+        "connected_at": datetime.datetime.now(datetime.timezone.utc),
+    }
+    if secret_name:
+        doc["secret_name"] = secret_name
+    _get_client().collection(_CONNECTED_REPOS_COLLECTION).document(doc_id).set(doc)
     return doc_id
+
+
+def update_connected_repo(repo: str, **fields) -> None:
+    """이미 연결된 저장소의 필드(예: secret_name 재발급)를 갱신한다.
+    새 문서를 만들지 않고 기존 문서를 그대로 덮어써서 중복 레코드를 막는다."""
+    for r in list_connected_repos():
+        if r.get("repo") == repo:
+            _get_client().collection(_CONNECTED_REPOS_COLLECTION).document(r["id"]).update(fields)
+            return
 
 
 def list_connected_repos() -> list[dict]:
