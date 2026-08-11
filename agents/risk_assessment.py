@@ -44,7 +44,10 @@ class RiskAssessmentOutput(BaseModel):
         description="검색된 특허가 아예 없어서 위험도가 낮은 경우, 이를 차별화 기회로 해석하는 한두 문장. "
         "그 외의 경우(특허는 검색됐지만 무관해서 낮음, 검색 실패 등)에는 빈 문자열",
     )
-    recommended_action: str = Field(description="사용자가 다음에 취해야 할 구체적 행동")
+    recommended_action: str = Field(
+        description="사용자가 다음에 취해야 할 구체적 행동. patent_reasons가 비어있지 않으면 "
+        "raw_diff_or_doc에서 그 근거와 관련된 파일명·줄 범위를 반드시 짚어서 말할 것"
+    )
 
 
 risk_assessment_agent = LlmAgent(
@@ -62,6 +65,11 @@ risk_assessment_agent = LlmAgent(
 특허 검색 결과:
 ---
 {patent_search_results}
+---
+
+원본 변경사항 (diff 또는 문서 전문):
+---
+{raw_diff_or_doc}
 ---
 
 규칙:
@@ -115,6 +123,13 @@ risk_assessment_agent = LlmAgent(
   남기세요.
 - 추측이나 확정적 법률 판단(예: "이것은 특허 침해입니다")은 하지 마세요. IP Sentinel은
   1차 스크리닝 도구이지 법률 자문이 아닙니다.
+- recommended_action은 "변리사와 상담하세요" 같은 뻔한 말로 끝내지 마세요. patent_reasons가
+  비어있지 않으면, 원본 변경사항에서 그 근거가 된 부분을 실제로 찾아 구체적으로 짚으세요.
+  diff 형식(`--- 파일명 ---` 뒤에 `@@ -a,b +c,d @@`가 있는 형태)이면 관련된 파일명과 그
+  hunk의 새 줄 번호 범위(+c,d 쪽)를 언급하세요 (예: "services/license_client.py의
+  45~52번째 줄에서 추가된 라이선스 조회 로직을 재검토하세요"). diff가 아니라 문서나
+  파일 전체 내용이면 줄 번호 대신 관련 섹션/함수명을 짚으세요. patent_reasons가 비어있으면
+  (risk_level=low) "특별한 조치가 필요하지 않습니다"처럼 짧게만 쓰세요.
 """,
     output_schema=RiskAssessmentOutput,
     output_key="risk_assessment",
