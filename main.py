@@ -396,7 +396,6 @@ async def report_detail_page(report_id: str):
     # 구 스키마(rationale/related_patents)로 저장된 예전 리포트도 안 죽게 폴백 처리
     intro = ra.get("intro") or ra.get("rationale") or ""
     patent_reasons = ra.get("patent_reasons") or []
-    closing_note = ra.get("closing_note") or ""
     opportunity_note = ra.get("opportunity_note") or ""
     recommended_action = ra.get("recommended_action") or ""
 
@@ -437,8 +436,6 @@ async def report_detail_page(report_id: str):
             "margin:4px 0 16px; font-size:14px; color:#1a7f37; line-height:1.7;'>"
             f"<strong>차별화 포인트:</strong> {opportunity_note}</div>"
         )
-    if closing_note:
-        rationale_parts.append(f"<p style='font-size:14px; color:#444; line-height:1.7; margin:0;'>{closing_note}</p>")
     rationale_html = "".join(rationale_parts) if rationale_parts else "<p class='empty-inline'>근거 없음</p>"
 
     def _render_numbered_patent(num: int, m: dict, is_last: bool) -> str:
@@ -561,8 +558,8 @@ async def report_detail_page(report_id: str):
   <h2>근거</h2>
   {rationale_html}
 
-  <h2>권장 액션</h2>
-  <div class="box">{recommended_action or '권장 액션 없음'}</div>
+  <h2>검토 포인트</h2>
+  <div class="box">{recommended_action or '검토 포인트 없음'}</div>
 
   <h2>참고한 특허</h2>
   {matches_html}
