@@ -687,7 +687,7 @@ async def connect_page():
   {connected_html}
 
   <h2>새 저장소 연결</h2>
-  <p class="sub">owner/repo 형식으로 입력하세요. 연결하면 웹훅을
+  <p class="sub" style="max-width:420px;">owner/repo 형식으로 입력하세요. 연결하면 웹훅을
     자동으로 등록하고, 이미 저장소에 있던 기획 문서·코드도 한 번 훑어 리포트를 만듭니다.</p>
   <form method="post" action="/connect" style="margin-top:12px; display:flex; flex-direction:column; gap:8px; max-width:420px;">
     <input type="text" name="repo" placeholder="owner/repo" required
