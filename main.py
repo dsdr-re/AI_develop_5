@@ -24,6 +24,7 @@ from services.firestore_store import (
     mark_resolved,
     remove_connected_repo,
     save_report,
+    update_connected_repo,
 )
 from services.github_client import (
     create_webhook,
@@ -38,6 +39,7 @@ from services.github_client import (
     verify_webhook_signature,
 )
 from services.license_client import get_pypi_license
+from services.secret_store import get_workspace_token, save_workspace_token
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -139,6 +141,18 @@ _PAGE_STYLE = """
   .ref-num { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center;
              justify-content: center; font-size: 13px; font-weight: 500; flex-shrink: 0; }
 """
+
+
+async def _resolve_repo_token(repo: str) -> str | None:
+    """owner/repo 문자열로 Firestore 연결 기록을 찾아 그 저장소의 PAT을 꺼낸다.
+
+    연결 기록이 없거나 secret_name이 없으면(레거시 연결) None을 반환하고,
+    github_client.py의 각 함수는 token=None일 때 GITHUB_ACCESS_TOKEN 환경변수로
+    자동 폴백하므로 기존 레거시 저장소는 그대로 동작한다."""
+    record = get_connected_repo(repo)
+    if not record:
+        return None
+    return get_workspace_token(record.get("secret_name"))
 
 
 def _nav_html(active: str) -> str:
@@ -657,10 +671,15 @@ async def connect_page():
   <h2>새 저장소 연결</h2>
   <p class="sub">owner/repo 형식으로 입력하세요 (예: dsdr-re/AI_develop_5). 연결하면 웹훅을
     자동으로 등록하고, 이미 저장소에 있던 기획 문서·코드도 한 번 훑어 리포트를 만듭니다.</p>
-  <form method="post" action="/connect" style="margin-top:12px; display:flex; gap:8px;">
+  <form method="post" action="/connect" style="margin-top:12px; display:flex; flex-direction:column; gap:8px; max-width:420px;">
     <input type="text" name="repo" placeholder="owner/repo" required
-      style="padding:8px 12px; width:280px; border:0.5px solid #ccc; border-radius:8px; font-size:14px;">
-    <button type="submit" class="btn-primary">연결하기</button>
+      style="padding:8px 12px; border:0.5px solid #ccc; border-radius:8px; font-size:14px;">
+    <input type="password" name="token" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx (GitHub personal access token)" required
+      style="padding:8px 12px; border:0.5px solid #ccc; border-radius:8px; font-size:14px;">
+    <p class="sub" style="margin:0; font-size:12px;">연결하려는 저장소에 admin 권한이 있는 계정에서 발급한 토큰이 필요합니다
+      (repo, admin:repo_hook 권한). <a href="https://github.com/settings/tokens/new" target="_blank">토큰 발급하기 →</a><br>
+      토큰은 이 저장소 연결에만 쓰이고 Secret Manager에 암호화되어 저장되며, 연결 해제 시에도 별도로 남지 않습니다.</p>
+    <button type="submit" class="btn-primary" style="align-self:flex-start;">연결하기</button>
   </form>
 </body>
 </html>"""
@@ -675,8 +694,9 @@ async def disconnect_repo(repo: str = Form(...)):
         owner, _, repo_name = repo.partition("/")
         webhook_id = existing.get("webhook_id")
         if webhook_id:
+            token = await _resolve_repo_token(repo)
             try:
-                await delete_webhook(owner, repo_name, webhook_id)
+                await delete_webhook(owner, repo_name, webhook_id, token=token)
             except Exception:
                 logger.exception("failed to delete webhook for %s (id=%s)", repo, webhook_id)
         remove_connected_repo(repo)
@@ -705,9 +725,10 @@ async def _run_initial_scan(owner: str, repo: str) -> None:
     MAX_FILES = 5  # 한 번에 너무 많이 하면 KIPRIS 부하 + Cloud Run 5분 타임아웃 위험. 이어서 스캔 가능.
     DELAY_BETWEEN_FILES = 2.0
     repo_id = f"{owner}/{repo}"
+    token = await _resolve_repo_token(repo_id)
     try:
-        branch = await get_default_branch(owner, repo)
-        files = await list_repo_files(owner, repo, branch=branch)
+        branch = await get_default_branch(owner, repo, token=token)
+        files = await list_repo_files(owner, repo, branch=branch, token=token)
     except Exception:
         logger.exception("initial scan: failed to list files for %s/%s", owner, repo)
         return
@@ -733,7 +754,7 @@ async def _run_initial_scan(owner: str, repo: str) -> None:
         if scanned > 0:
             await asyncio.sleep(DELAY_BETWEEN_FILES)
         try:
-            content = await get_file_content(owner, repo, path)
+            content = await get_file_content(owner, repo, path, token=token)
         except Exception:
             logger.exception("initial scan: failed to fetch %s", path)
             continue
@@ -764,8 +785,11 @@ async def _run_initial_scan(owner: str, repo: str) -> None:
 
 
 @app.post("/connect", response_class=HTMLResponse)
-async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo: str = Form(...)):
+async def connect_repo(
+    request: Request, background_tasks: BackgroundTasks, repo: str = Form(...), token: str = Form(...)
+):
     repo = repo.strip()
+    token = token.strip()
     if "/" not in repo:
         return HTMLResponse(
             content="<p>owner/repo 형식으로 입력해주세요 (예: dsdr-re/AI_develop_5). "
@@ -777,6 +801,9 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
     webhook_url = str(request.base_url).rstrip("/") + "/webhook/github"
     secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
+    # 토큰은 항상 먼저 Secret Manager에 저장한다 (재연결 시 토큰 갱신도 이 한 줄로 처리됨).
+    secret_name = save_workspace_token(repo, token)
+
     already_tracked = get_connected_repo(repo) is not None
 
     webhook_ok = False
@@ -784,13 +811,14 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
     webhook_error = ""
 
     if already_tracked:
-        # 이미 우리 목록에 있으면 GitHub API를 또 두드릴 필요가 없다 (이 자체도
-        # KIPRIS처럼 과도한 외부 호출을 줄이려는 목적).
+        # 웹훅은 이미 등록돼 있으니 GitHub API를 또 두드릴 필요는 없지만, 이번에
+        # 새로 입력받은 토큰으로 연결 기록은 갱신해둔다 (계정을 바꿔 재연결하는 경우 대응).
+        update_connected_repo(repo, secret_name=secret_name)
         webhook_ok = True
     else:
         try:
-            result = await create_webhook(owner, repo_name, webhook_url, secret)
-            add_connected_repo(repo, webhook_id=result.get("id"))
+            result = await create_webhook(owner, repo_name, webhook_url, secret, token=token)
+            add_connected_repo(repo, webhook_id=result.get("id"), secret_name=secret_name)
             webhook_ok = True
         except Exception as exc:
             webhook_error = str(exc)
@@ -799,11 +827,11 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
                 # 기존 웹훅 ID를 찾아서 우리 추적 목록에 편입시킨다.
                 webhook_already_exists = True
                 try:
-                    hook_id = await find_webhook_id(owner, repo_name, webhook_url)
-                    add_connected_repo(repo, webhook_id=hook_id)
+                    hook_id = await find_webhook_id(owner, repo_name, webhook_url, token=token)
+                    add_connected_repo(repo, webhook_id=hook_id, secret_name=secret_name)
                 except Exception:
                     logger.exception("failed to adopt existing webhook for %s", repo)
-                    add_connected_repo(repo, webhook_id=None)
+                    add_connected_repo(repo, webhook_id=None, secret_name=secret_name)
             else:
                 logger.warning("웹훅 자동 등록 실패: %s/%s: %s", owner, repo_name, exc)
 
@@ -853,7 +881,7 @@ async def connect_repo(request: Request, background_tasks: BackgroundTasks, repo
     return HTMLResponse(content=html)
 
 
-async def _process_push_event(info: dict, diff_text: str) -> None:
+async def _process_push_event(info: dict, diff_text: str, token: str | None = None) -> None:
     if not diff_text.strip():
         logger.info("empty diff, skip: %s/%s @ %s", info["owner"], info["repo"], info["commit_sha"])
         return
@@ -884,7 +912,7 @@ async def _process_push_event(info: dict, diff_text: str) -> None:
     final_report = result.get("final_report")
     if final_report:
         try:
-            await post_commit_comment(info["owner"], info["repo"], info["commit_sha"], final_report)
+            await post_commit_comment(info["owner"], info["repo"], info["commit_sha"], final_report, token=token)
             logger.info("commit comment posted: %s/%s @ %s", info["owner"], info["repo"], info["commit_sha"])
         except Exception:
             logger.exception("failed to post commit comment")
@@ -914,9 +942,13 @@ async def github_webhook(
 
     logger.info("push event received: %s/%s @ %s", info["owner"], info["repo"], info["commit_sha"])
 
-    diff_text = await get_commit_diff(info["owner"], info["repo"], info["commit_sha"])
+    # GitHub 서버가 직접 호출하는 요청이라 "누가 연결했는지" 정보가 없다 — owner/repo로
+    # 이 저장소가 어떤 워크스페이스 토큰에 연결돼 있는지 조회한다 (레거시 연결은 None이 와서
+    # get_commit_diff/post_commit_comment 내부에서 환경변수로 자동 폴백한다).
+    token = await _resolve_repo_token(f"{info['owner']}/{info['repo']}")
+    diff_text = await get_commit_diff(info["owner"], info["repo"], info["commit_sha"], token=token)
 
-    background_tasks.add_task(_process_push_event, info, diff_text)
+    background_tasks.add_task(_process_push_event, info, diff_text, token)
 
     return {"status": "accepted", "message": "분석을 시작했습니다. 대시보드나 리포트 이력에서 확인하세요."}
 
