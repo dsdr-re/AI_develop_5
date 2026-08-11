@@ -82,7 +82,8 @@ _ICON_CHECK = (
 
 _PAGE_STYLE = """
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          max-width: 960px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }
+          max-width: 960px; margin: 40px auto; padding: 0 20px; color: #1a1a1a;
+          word-break: keep-all; }
   h1 { font-size: 20px; margin-bottom: 4px; font-weight: 500; }
   h2 { font-size: 16px; margin-top: 28px; margin-bottom: 8px; font-weight: 500; }
   .sub { color: #666; font-size: 14px; margin-top: 0; }
@@ -694,9 +695,8 @@ async def connect_page():
       style="padding:8px 12px; border:0.5px solid #ccc; border-radius:8px; font-size:14px; max-width:420px;">
     <input type="password" name="token" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx (GitHub personal access token)" required
       style="padding:8px 12px; border:0.5px solid #ccc; border-radius:8px; font-size:14px; max-width:420px;">
-    <p class="sub" style="margin:0; font-size:12px;">연결하려는 저장소에 admin 권한이 있는 계정에서 발급한 토큰이 필요합니다
-      (repo, admin:repo_hook 권한). <a href="https://github.com/settings/tokens/new" target="_blank">토큰 발급하기 →</a>
-      토큰은 이 저장소 연결에만 쓰이고 Secret Manager에 암호화되어 저장되며, 연결 해제 시에도 별도로 남지 않습니다.</p>
+    <p class="sub" style="margin:0; font-size:12px;">연결하려는 저장소에 admin 권한이 있는 계정에서 발급한 토큰이 필요합니다 (repo, admin:repo_hook 권한).<br>
+      <a href="https://github.com/settings/tokens/new" target="_blank">토큰 발급하기 →</a> 토큰은 이 저장소 연결에만 쓰이고 Secret Manager에 암호화되어 저장되며, 연결 해제 시에도 별도로 남지 않습니다.</p>
     <button type="submit" class="btn-primary" style="align-self:flex-start;">연결하기</button>
   </form>
 </body>
