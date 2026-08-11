@@ -70,14 +70,22 @@ risk_assessment_agent = LlmAgent(
   intro에 "KIPRIS 검색이 실패해 위험 여부를 확인하지 못함"이라고 명시하세요.
   patent_reasons는 빈 배열로 두고, closing_note에 "재검색 또는 수동 확인 필요"라고
   적으세요. 검색 실패를 "안전함"으로 착각하는 것이 가장 위험한 오류입니다.
-- search_failed가 false이면서 searched가 false이거나 matches가 비어있으면
-  risk_level="low", intro에 "관련 특허가 검색되지 않음"이라고 명시하고 patent_reasons는
-  빈 배열로 두세요. 이 경우 opportunity_note에 "이 아이디어와 겹치는 특허가 검색되지
-  않았습니다. 기존 특허들이 다루지 않은 영역일 수 있어, 오히려 차별화 포인트로
-  활용할 만한 여지가 있습니다"와 같이 긍정적으로 해석하는 한두 문장을 추가하세요.
-  (주의: 이건 "검색된 특허가 아예 없을 때"만 해당합니다. 특허가 검색됐지만 무관해서
-  patent_reasons가 빈 경우나 search_failed인 경우에는 "차별화됐다"고 확신할 근거가
-  없으므로 opportunity_note를 빈 문자열로 두세요.)
+- searched가 false이면 (extracted_context가 애초에 특허 관련 아이디어를 찾지
+  못해 검색 자체를 하지 않은 경우) risk_level="low", intro는 "이번 변경사항은
+  특허 검토 대상이 아닙니다."처럼 짧은 한 문장으로만 쓰고, extracted_context.summary가
+  이미 설명한 이유를 다시 풀어서 설명하지 마세요 (화면에 요약과 근거가 나란히 뜨는데
+  같은 말을 두 번 하면 안 됩니다). patent_reasons는 빈 배열, opportunity_note는 반드시
+  빈 문자열로 두세요 — 애초에 검토할 아이디어가 없었던 것이므로 "차별화 포인트"라고
+  부를 대상 자체가 없습니다.
+- search_failed가 false이면서 searched가 true인데 matches가 비어있으면 (실제로
+  검색은 했는데 겹치는 특허가 하나도 없었던 경우) risk_level="low", intro에 "관련
+  특허를 검색했으나 겹치는 항목이 없었습니다"라고 명시하고 patent_reasons는 빈
+  배열로 두세요. 이 경우에만 opportunity_note에 "이 아이디어와 겹치는 특허가
+  검색되지 않았습니다. 기존 특허들이 다루지 않은 영역일 수 있어, 오히려 차별화
+  포인트로 활용할 만한 여지가 있습니다"와 같이 긍정적으로 해석하는 한두 문장을
+  추가하세요. (특허가 검색됐지만 무관해서 patent_reasons가 빈 경우나 search_failed인
+  경우에는 "차별화됐다"고 확신할 근거가 없으므로 opportunity_note를 빈 문자열로
+  두세요.)
 - **중요**: patent_search_results.matches는 관련성 필터링을 거치지 않은 원본 검색
   결과입니다. matches에 항목이 있다고 곧바로 위험하다고 판단하지 마세요. 각 항목의
   title·abstract_snippet을 extracted_context의 핵심 아이디어와 직접 비교해서, 실제로
