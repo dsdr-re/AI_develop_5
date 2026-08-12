@@ -2,7 +2,7 @@
 
 전담 특허팀이 없는 스타트업 개발팀의 GitHub 저장소 변경사항을 지속 추적해
 특허 침해·오픈소스 라이선스 리스크를 조기 발견하는 AI 에이전트.
-
+'''
 ## 구조
 AI_develop_5/
 ├── main.py # Cloud Run 엔트리포인트, 웹 UI + GitHub 웹훅 수신 (Orchestrator)
@@ -23,6 +23,7 @@ AI_develop_5/
 ├── static/logo.png
 └── tests/
 └── test_kipris_client.py
+'''
 ## 웹 화면
 
 - `/` — 대시보드 (최근 리포트 요약)
